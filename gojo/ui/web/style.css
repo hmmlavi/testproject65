@@ -1,4 +1,4 @@
-/* GOJO — Phase 2 front-end
+/* GOJO — Phase 3 front-end
    Design rules: dark, quiet, glassy. One muted ice accent. No neon,
    no orange, no oversized cards. Motion is subtle and state-driven. */
 
@@ -78,6 +78,9 @@ button { font-family: inherit; }
 body[data-state="active"] .pill .dot { background: var(--ok); box-shadow: 0 0 8px rgba(158, 201, 168, 0.45); }
 body[data-state="thinking"] .pill .dot { background: var(--accent); animation: blink 1.1s ease-in-out infinite; }
 body[data-state="sleeping"] .pill .dot { background: #4a5260; }
+body[data-state="listening"] .pill .dot { background: var(--danger); animation: blink 0.9s ease-in-out infinite; }
+body[data-state="speaking"] .pill .dot { background: var(--accent); animation: blink 0.7s ease-in-out infinite; }
+body[data-state="error"] .pill .dot { background: var(--danger); }
 
 /* control rail */
 .rail { display: flex; align-items: center; gap: 4px; }
@@ -148,8 +151,11 @@ body[data-state="thinking"] .avatar-ring { animation: ringPulse 1.9s ease-out in
 body[data-state="sleeping"] .avatar-wrap { opacity: 0.42; }
 body[data-state="sleeping"] .avatar-mark { color: rgba(232, 237, 242, 0.35); }
 
-/* Phase 3 will drive this from actual TTS playback — the hook exists now. */
-body[data-state="speaking"] .avatar-ring { animation: ringPulse 1.2s ease-out infinite; }
+/* voice states (Phase 3) */
+body[data-state="listening"] .avatar-ring { border-color: rgba(217, 138, 138, 0.45); }
+body[data-state="listening"] .avatar-orb { animation: breathe 2.4s ease-in-out infinite; }
+body[data-state="speaking"] .avatar-ring { animation: ringPulse 1.2s ease-out infinite; border-color: var(--line-strong); }
+body[data-state="error"] .avatar-ring { border-color: rgba(217, 138, 138, 0.5); }
 
 @keyframes breathe {
   0%, 100% { transform: scale(1); }
@@ -210,7 +216,7 @@ body[data-state="speaking"] .avatar-ring { animation: ringPulse 1.2s ease-out in
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 6px 6px 6px 18px;
+  padding: 6px 6px 6px 6px;
   border-radius: 999px;
   background: var(--glass);
   border: 1px solid var(--line);
@@ -228,6 +234,7 @@ body[data-state="sleeping"] .composer { opacity: 0.55; }
   color: var(--text);
   font-size: 14.5px;
   font-family: inherit;
+  padding: 0 12px;
 }
 .composer input::placeholder { color: var(--text-faint); }
 .composer input:disabled { cursor: not-allowed; }
@@ -246,6 +253,40 @@ body[data-state="sleeping"] .composer { opacity: 0.55; }
 }
 .send:hover:not(:disabled) { background: rgba(143, 184, 204, 0.28); }
 .send:disabled { color: var(--text-faint); background: transparent; cursor: not-allowed; }
+
+/* mic (Phase 3) — press-to-talk. Same shape as send, same calm style;
+   "listening" is the only state it animates. */
+.mic {
+  width: 38px; height: 38px;
+  flex: none;
+  border-radius: 50%;
+  border: none;
+  background: var(--accent-soft);
+  color: var(--accent);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: background 0.15s, color 0.15s, box-shadow 0.2s;
+}
+.mic:hover:not(:disabled) { background: rgba(143, 184, 204, 0.28); }
+.mic:disabled { color: var(--text-faint); background: transparent; cursor: not-allowed; }
+.mic.listening {
+  background: rgba(217, 138, 138, 0.2);
+  color: var(--danger);
+  animation: micPulse 1.4s ease-out infinite;
+}
+
+@keyframes micPulse {
+  0% { box-shadow: 0 0 0 0 rgba(217, 138, 138, 0.35); }
+  100% { box-shadow: 0 0 0 14px rgba(217, 138, 138, 0); }
+}
+
+.talk-hint {
+  font-size: 12px;
+  color: var(--text-faint);
+  letter-spacing: 0.08em;
+  min-height: 14px;
+}
 
 /* ---------------- transcript panel ---------------- */
 
@@ -311,6 +352,13 @@ body.tr-open .transcript { transform: translateX(0); }
   margin-bottom: 4px;
 }
 .entry.gojo .who { color: var(--accent); }
+/* origin marker for spoken lines (Phase 3): a quiet "· voice" after the name */
+.entry .who .via {
+  margin-left: 8px;
+  letter-spacing: 0.1em;
+  color: var(--accent);
+  opacity: 0.75;
+}
 .entry .txt {
   font-size: 13px;
   line-height: 1.55;
@@ -336,8 +384,10 @@ body.tr-open .transcript { transform: translateX(0); }
 .modal.open { display: flex; }
 
 .modal-card {
-  width: 400px;
+  width: 420px;
   max-width: calc(100vw - 48px);
+  max-height: calc(100vh - 96px);
+  overflow-y: auto;
   background: var(--glass-strong);
   border: 1px solid var(--line);
   border-radius: 16px;
@@ -392,9 +442,53 @@ body.tr-open .transcript { transform: translateX(0); }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 230px;
+  max-width: 250px;
 }
 .set-value.small { font-size: 11.5px; color: var(--text-dim); }
+
+.set-section {
+  font-size: 10px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  padding: 16px 0 4px;
+}
+
+/* small switch (Phase 3 voice settings) */
+.switch { position: relative; width: 34px; height: 19px; flex: none; cursor: pointer; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .sw {
+  position: absolute; inset: 0;
+  border-radius: 999px;
+  background: var(--glass);
+  border: 1px solid var(--line-strong);
+  transition: background 0.15s, border-color 0.15s;
+}
+.switch .sw::after {
+  content: "";
+  position: absolute;
+  top: 2px; left: 2px;
+  width: 13px; height: 13px;
+  border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform 0.15s, background 0.15s;
+}
+.switch input:checked + .sw { background: var(--accent-soft); border-color: var(--accent); }
+.switch input:checked + .sw::after { transform: translateX(15px); background: var(--accent); }
+
+.set-select {
+  background: var(--glass);
+  color: var(--text);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12px;
+  font-family: inherit;
+  outline: none;
+  max-width: 250px;
+}
+.set-select:focus { border-color: var(--line-strong); }
+.set-select option { background: #10141b; color: var(--text); }
 
 .modal-actions {
   display: flex;

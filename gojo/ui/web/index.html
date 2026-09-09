@@ -64,6 +64,12 @@
     </div>
 
     <form class="composer" id="composer">
+      <button type="button" class="mic" id="btnMic" title="Talk — click to start/stop speaking" aria-label="Talk" disabled>
+        <svg id="micIcon" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="9" y="3" width="6" height="11" rx="3"/>
+          <path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/>
+        </svg>
+      </button>
       <input id="input" type="text" placeholder="Message GOJO…" autocomplete="off" spellcheck="false" disabled>
       <button type="submit" class="send" id="btnSend" title="Send" aria-label="Send" disabled>
         <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -71,6 +77,7 @@
         </svg>
       </button>
     </form>
+    <div class="talk-hint" id="talkHint" hidden>Listening… speak now, or click 🎙 to stop</div>
   </main>
 
   <aside class="transcript" id="transcriptPanel" aria-label="Conversation transcript">
@@ -93,6 +100,28 @@
       <div class="set-row"><span class="set-label">State</span><span class="set-value" id="setState">—</span></div>
       <div class="set-row"><span class="set-label">Data folder</span><span class="set-value small" id="setData" title="">—</span></div>
       <div class="set-row"><span class="set-label">Version</span><span class="set-value" id="setVersion">—</span></div>
+
+      <div class="set-section">Voice</div>
+      <div class="set-row">
+        <span class="set-label">Voice on/off</span>
+        <label class="switch"><input type="checkbox" id="setVoiceOn"><span class="sw"></span></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">Reply with voice</span>
+        <label class="switch"><input type="checkbox" id="setAutoplay"><span class="sw"></span></label>
+      </div>
+      <div class="set-row">
+        <span class="set-label">Voice engine</span>
+        <select class="set-select" id="setProvider" title="Fish Audio is the primary voice; Windows local voice is the automatic backup">
+          <option value="auto">auto — Fish, local backup</option>
+          <option value="fish">Fish first</option>
+          <option value="windows">local only (offline)</option>
+        </select>
+      </div>
+      <div class="set-row"><span class="set-label">Fish voice</span><span class="set-value small" id="setFishVoice" title="">—</span></div>
+      <div class="set-row"><span class="set-label">Fish key</span><span class="set-value small" id="setFishStatus">—</span></div>
+      <div class="set-row"><span class="set-label">Speech-to-text</span><span class="set-value small" id="setSttModel">—</span></div>
+
       <div class="modal-actions">
         <button class="btn danger" id="btnClearData" title="Deletes all saved conversations">Clear all data</button>
         <button class="btn" id="btnModalDone">Close</button>

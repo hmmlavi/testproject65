@@ -1,5 +1,11 @@
-# GOJO — Phase 2 dependencies (desktop app + AI brain)
-# Phase 3 will add: faster-whisper, sounddevice, piper-tts
+# GOJO dependencies
+# Phase 1-2: AI brain + desktop window
 google-genai>=2.0
 python-dotenv>=1.0
 pywebview>=6.0
+
+# Phase 3: voice (all run locally on CPU — no GPU required)
+faster-whisper>=1.0      # speech-to-text (first use downloads the model, ~460 MB for "small")
+sounddevice>=0.4         # microphone capture
+numpy>=1.26              # audio buffers (endpointing math)
+pyttsx3>=2.40            # Windows local voice (automatic fallback when Fish is unavailable)

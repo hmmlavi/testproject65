@@ -1,10 +1,16 @@
-/* GOJO — Phase 2 front-end logic.
+/* GOJO — Phase 3 front-end logic.
    Talks to Python ONLY through window.pywebview.api (see gojo/ui/api.py).
    No state is kept on the JS side that Python doesn't own.
 
    BRIDGE RULE: every Python call goes through callApi(), so a broken
    bridge can never fail silently — it toasts an error and, if the bridge
-   never comes up at all, the page shows a full-screen fatal message. */
+   never comes up at all, the page shows a full-screen fatal message.
+
+   Phase 3 additions (voice): the 🎙 Talk button (click = start/stop
+   listening), voice status in the pill + avatar, note toasts (one-shot
+   messages from the voice pipeline, e.g. "backup voice used"), voice
+   settings in the settings modal, and a "· voice" marker on transcript
+   lines that came from speech. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -17,6 +23,8 @@ const els = {
   heroText: $("heroText"),
   input: $("input"),
   btnSend: $("btnSend"),
+  btnMic: $("btnMic"),
+  talkHint: $("talkHint"),
   btnPower: $("btnPower"),
   btnNew: $("btnNew"),
   btnTranscript: $("btnTranscript"),
@@ -31,6 +39,12 @@ const els = {
   setState: $("setState"),
   setData: $("setData"),
   setVersion: $("setVersion"),
+  setVoiceOn: $("setVoiceOn"),
+  setAutoplay: $("setAutoplay"),
+  setProvider: $("setProvider"),
+  setFishVoice: $("setFishVoice"),
+  setFishStatus: $("setFishStatus"),
+  setSttModel: $("setSttModel"),
   btnModalClose: $("btnModalClose"),
   btnModalDone: $("btnModalDone"),
   btnClearData: $("btnClearData"),
@@ -41,14 +55,24 @@ const els = {
 
 let api = null;
 let booted = false;
-let busy = false;
+let busy = false; // this client is mid-text-turn
 let transcriptOpen = false;
 let lastResponse = false; // has GOJO replied in this session?
+let voiceEnabled = false; // from get_voice_settings
+let wasVoiceBusy = false; // previous status.busy (voice turn in flight)
 
 const IDLE_TEXT = {
   sleeping: "· · · sleeping · · ·",
   active: "Awake. Kya chahiye, boss?",
-  thinking: "",
+};
+
+const PILL_TEXT = {
+  sleeping: "sleeping",
+  active: "awake",
+  thinking: "thinking",
+  listening: "listening…",
+  speaking: "speaking…",
+  error: "error",
 };
 
 /* ------------------------------------------------------------------ */
@@ -103,17 +127,18 @@ async function init() {
     console.warn("init: get_status failed", err);
   }
   try {
+    await loadVoiceSettings();
     await loadTranscript();
     await openSettingsData();
   } catch (err) {
     console.warn("init: transcript/settings failed", err);
   }
-  setInterval(() => refreshStatus(), 900); // status polling (push comes in Phase 3 with voice)
+  setInterval(() => refreshStatus(), 900); // status polling (voice notes ride along)
   els.input.focus();
 }
 
 /* ------------------------------------------------------------------ */
-/* status                                                              */
+/* status — pill, avatar, mic button, one-shot notes                   */
 /* ------------------------------------------------------------------ */
 
 function refreshStatus() {
@@ -124,21 +149,49 @@ function refreshStatus() {
 
 async function applyStatus(status) {
   if (!status) return;
-  els.body.dataset.state = status.state;
-  els.statusText.textContent = status.state;
+  const state = status.state;
+  els.body.dataset.state = state;
+  els.statusText.textContent = PILL_TEXT[state] || state;
 
-  const sleeping = status.state === "sleeping";
-  els.input.disabled = sleeping || busy;
-  els.btnSend.disabled = sleeping || busy;
+  const sleeping = state === "sleeping";
+  const listening = state === "listening";
+  const voiceBusy = !!status.busy;
+
+  // one-shot note from the voice pipeline (e.g. fallback warning) —
+  // the bridge clears it once delivered, so we only ever show it once
+  if (status.note && status.note.text) {
+    toast(status.note.text, !!status.note.error);
+  }
+
+  // composer + mic live on the same busy flags
+  els.input.disabled = sleeping || busy || voiceBusy || !voiceEnabled;
+  els.btnSend.disabled = sleeping || busy || voiceBusy || !voiceEnabled;
+  els.btnMic.disabled =
+    sleeping || !voiceEnabled || (voiceBusy && !listening);
+  els.btnMic.classList.toggle("listening", listening);
+  els.talkHint.hidden = !listening;
 
   // hero placeholder only when GOJO hasn't replied yet
-  if (!lastResponse) {
-    els.heroIdle.textContent = IDLE_TEXT[status.state] || "";
+  if (!lastResponse && IDLE_TEXT[state]) {
+    els.heroIdle.textContent = IDLE_TEXT[state];
   }
+
+  // when a voice turn ends, the transcript has new lines and a new
+  // reply (voice turns don't return the reply to the clicker) — refresh
+  if (wasVoiceBusy && !voiceBusy) {
+    try {
+      const items = await loadTranscript();
+      const last = items.filter((i) => i.role === "model").pop();
+      if (last) showReply(last.text);
+    } catch (err) {
+      console.warn("post-voice transcript refresh failed", err);
+    }
+  }
+  wasVoiceBusy = voiceBusy;
 }
 
 /* ------------------------------------------------------------------ */
-/* chat                                                                */
+/* chat (text path — unchanged from Phase 2)                           */
 /* ------------------------------------------------------------------ */
 
 function onSend() {
@@ -160,8 +213,8 @@ function onSend() {
         toast(r.error, true);
         return;
       }
-      appendEntry("you", text);
-      appendEntry("gojo", r.reply);
+      appendEntry("you", text, "text");
+      appendEntry("gojo", r.reply, "ai");
       showReply(r.reply);
     })
     .catch(() => {}) // transport errors already toasted by callApi
@@ -187,10 +240,35 @@ function showReply(text) {
 }
 
 /* ------------------------------------------------------------------ */
-/* transcript                                                          */
+/* voice (Phase 3) — press-to-talk via the mic button                  */
 /* ------------------------------------------------------------------ */
 
-function appendEntry(who, text) {
+function onTalk() {
+  const state = els.body.dataset.state;
+  if (state === "sleeping") {
+    toast("GOJO is sleeping — press power first");
+    return;
+  }
+  if (!voiceEnabled) {
+    toast("Voice is off — turn it on in Settings");
+    return;
+  }
+  const listening = state === "listening";
+  // explicit calls (not a ternary) so the wiring test can see both names
+  const call = listening ? callApi("stop_talk") : callApi("start_talk");
+  call
+    .then((r) => {
+      if (!r.ok && r.error) toast(r.error, true);
+      refreshStatus();
+    })
+    .catch(() => {}); // transport errors already toasted by callApi
+}
+
+/* ------------------------------------------------------------------ */
+/* transcript — lines can carry a `via` marker (text | voice | ai)     */
+/* ------------------------------------------------------------------ */
+
+function appendEntry(who, text, via) {
   if (els.trEmpty) els.trEmpty.style.display = "none";
   const entry = document.createElement("div");
   entry.className = "entry " + (who === "gojo" ? "gojo" : "user");
@@ -198,6 +276,12 @@ function appendEntry(who, text) {
   const label = document.createElement("div");
   label.className = "who";
   label.textContent = who === "gojo" ? "Gojo" : "You";
+  if (via === "voice") {
+    const tag = document.createElement("span");
+    tag.className = "via";
+    tag.textContent = "· voice";
+    label.appendChild(tag);
+  }
 
   const body = document.createElement("div");
   body.className = "txt";
@@ -217,15 +301,18 @@ function setCount(n) {
 async function loadTranscript() {
   els.trEntries.querySelectorAll(".entry").forEach((e) => e.remove());
   const r = await callApi("get_transcript");
+  let items = [];
   if (r.ok && r.items.length) {
     els.trEmpty.style.display = "none";
-    for (const item of r.items) {
-      appendEntry(item.role === "model" ? "gojo" : "you", item.text);
+    items = r.items;
+    for (const item of items) {
+      appendEntry(item.role === "model" ? "gojo" : "you", item.text, item.via);
     }
   } else {
     els.trEmpty.style.display = "";
   }
   setCount(els.trEntries.querySelectorAll(".entry").length);
+  return items;
 }
 
 async function onNewChat() {
@@ -254,6 +341,7 @@ async function openSettingsData() {
 
 function openSettings() {
   openSettingsData().catch(() => {});
+  loadVoiceSettings().catch(() => {});
   refreshStatus();
   setTimeout(() => {
     els.setState.textContent = els.body.dataset.state;
@@ -265,6 +353,34 @@ function openSettings() {
 function closeSettings() {
   els.modal.classList.remove("open");
   els.modal.setAttribute("aria-hidden", "true");
+}
+
+/* voice settings — stored as runtime prefs (data/gojo_prefs.json),
+   separate from .env (which holds keys + model choices) */
+
+async function loadVoiceSettings() {
+  const v = await callApi("get_voice_settings");
+  if (!v.ok) return;
+  voiceEnabled = !!v.voice_enabled;
+  els.setVoiceOn.checked = voiceEnabled;
+  els.setAutoplay.checked = !!v.tts_autoplay;
+  els.setProvider.value = v.tts_provider || "auto";
+  els.setFishVoice.textContent = v.fish_voice || "—";
+  els.setFishVoice.title = v.fish_voice || "";
+  els.setFishStatus.textContent = v.fish_configured
+    ? "ready"
+    : "missing — add FISH_AUDIO_API_KEY in .env";
+  els.setSttModel.textContent = v.stt_model || "—";
+  refreshStatus();
+}
+
+function saveVoicePref(key, value) {
+  callApi("set_voice_pref", key, value)
+    .then((r) => {
+      if (!r.ok && r.error) toast(r.error, true);
+      refreshStatus();
+    })
+    .catch(() => {});
 }
 
 async function onClearData() {
@@ -327,9 +443,19 @@ els.btnNew.addEventListener("click", onNewChat);
 els.btnTranscript.addEventListener("click", toggleTranscript);
 els.btnSettings.addEventListener("click", openSettings);
 els.btnQuit.addEventListener("click", onQuit);
+els.btnMic.addEventListener("click", onTalk);
 els.btnModalClose.addEventListener("click", closeSettings);
 els.btnModalDone.addEventListener("click", closeSettings);
 els.btnClearData.addEventListener("click", onClearData);
+els.setVoiceOn.addEventListener("change", (e) => {
+  saveVoicePref("voice_enabled", e.target.checked);
+});
+els.setAutoplay.addEventListener("change", (e) => {
+  saveVoicePref("tts_autoplay", e.target.checked);
+});
+els.setProvider.addEventListener("change", (e) => {
+  saveVoicePref("tts_provider", e.target.value);
+});
 els.modal.addEventListener("click", (e) => {
   if (e.target === els.modal) closeSettings();
 });

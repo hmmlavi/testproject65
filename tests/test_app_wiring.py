@@ -191,7 +191,7 @@ def test_dispatch_changes_gojo_state() -> None:
     print("PASS test_dispatch_changes_gojo_state")
 
 
-# args for side-effect-free dispatch checks (state changes are fine in tests)
+# args for dispatch checks (state changes are fine in throwaway test apps)
 _ARGS_FOR = {
     "get_status": [],
     "wake": [],
@@ -201,6 +201,11 @@ _ARGS_FOR = {
     "get_settings": [],
     "clear_data": [],
     "chat": ["wiring probe (resolve check)"],
+    # voice (Phase 3) — safe to dispatch headless
+    "start_talk": [],
+    "stop_talk": [],
+    "get_voice_settings": [],
+    "set_voice_pref": ["tts_provider", "auto"],
 }
 
 
