@@ -1,4 +1,4 @@
-"""Checks for the GOJO state machine.
+"""Checks for the GOJO state machine (incl. Phase 3 voice states).
 
 Run:  python -m tests.test_state
 """
@@ -82,7 +82,69 @@ def test_listener_crash_is_isolated() -> None:
     sm.add_listener(calls.append)
     sm.wake()
     assert calls == [AppState.ACTIVE]
-    print("PASS test_listener_crash_isolated")
+    print("PASS test_listener_crash_is_isolated")
+
+
+# ---------------- Phase 3 voice states ----------------
+
+
+def test_voice_flow_full_cycle() -> None:
+    """The press-to-talk happy path:
+    active -> listening -> thinking -> active -> speaking -> active."""
+    sm = _make()
+    sm.wake()
+    assert sm.begin_listening() is AppState.LISTENING
+    assert sm.begin_thinking() is AppState.THINKING  # speech ended, processing
+    assert sm.end_thinking() is AppState.ACTIVE
+    assert sm.begin_speaking() is AppState.SPEAKING  # TTS playing
+    assert sm.end_speaking() is AppState.ACTIVE
+    print("PASS test_voice_flow_full_cycle")
+
+
+def test_cannot_listen_while_asleep() -> None:
+    sm = _make()
+    assert sm.begin_listening() is AppState.SLEEPING  # must wake first
+    print("PASS test_cannot_listen_while_asleep")
+
+
+def test_stop_listening_returns_active() -> None:
+    sm = _make()
+    sm.wake()
+    sm.begin_listening()
+    assert sm.stop_listening() is AppState.ACTIVE
+    print("PASS test_stop_listening_returns_active")
+
+
+def test_sleep_pending_during_listening() -> None:
+    sm = _make()
+    sm.wake()
+    sm.begin_listening()
+    sm.sleep()  # "gojo, sleep" while GOJO is listening
+    assert sm.state is AppState.LISTENING and sm.pending_sleep
+    sm.begin_thinking()
+    assert sm.end_thinking() is AppState.SLEEPING
+    print("PASS test_sleep_pending_during_listening")
+
+
+def test_sleep_pending_during_speaking() -> None:
+    sm = _make()
+    sm.wake()
+    sm.begin_speaking()
+    sm.sleep()
+    assert sm.state is AppState.SPEAKING and sm.pending_sleep
+    assert sm.end_speaking() is AppState.SLEEPING
+    print("PASS test_sleep_pending_during_speaking")
+
+
+def test_error_is_transient() -> None:
+    sm = _make()
+    sm.wake()
+    assert sm.flash_error() is AppState.ERROR
+    assert sm.clear_error() is AppState.ACTIVE
+    # sleeping GOJO does not flash error (nothing to interrupt)
+    sm.sleep()
+    assert sm.flash_error() is AppState.SLEEPING
+    print("PASS test_error_is_transient")
 
 
 def main() -> int:
@@ -95,6 +157,12 @@ def main() -> int:
         test_wake_clears_pending_sleep,
         test_listener_notified_once_per_change,
         test_listener_crash_is_isolated,
+        test_voice_flow_full_cycle,
+        test_cannot_listen_while_asleep,
+        test_stop_listening_returns_active,
+        test_sleep_pending_during_listening,
+        test_sleep_pending_during_speaking,
+        test_error_is_transient,
     ]
     failures = 0
     for t in tests:

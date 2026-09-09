@@ -1,18 +1,20 @@
 """GOJO state machine — where GOJO is in the world right now.
 
-States (Phase 2):
-    SLEEPING  — GOJO is down. Input is disabled, avatar is dimmed.
-                App boots into SLEEPING (spec: starts with PC in a sleep
-                state and only activates on request).
-    ACTIVE    — awake, ready to respond.
-    THINKING  — processing a request (transient; always returns to
-                ACTIVE or SLEEPING).
+States:
+    SLEEPING   — GOJO is down. Input disabled, avatar dimmed.
+                 App boots into SLEEPING (spec: starts with PC in a sleep
+                 state and only activates on request).
+    ACTIVE     — awake, ready to respond.
+    LISTENING  — microphone open, capturing speech (Phase 3, press-to-talk).
+    THINKING   — processing a request (transient).
+    SPEAKING   — TTS audio playing (Phase 3).
+    ERROR      — transient failure flag; always auto-cleared to ACTIVE.
 
-Phase 3 will add LISTENING (mic open) and SPEAKING (voice out) as new
-members of this same enum — no other code changes required for that.
+Phase 4 will add wake-word listening on top (continuous listening stays
+off unless the user explicitly enables it — privacy default).
 
-Thread-safe: the UI bridge calls this from another thread while chat
-processing runs.
+Thread-safe: the UI bridge and the voice pipeline call this from other
+threads while chat processing runs.
 """
 from __future__ import annotations
 
@@ -24,7 +26,10 @@ from typing import Callable
 class AppState(str, Enum):
     SLEEPING = "sleeping"
     ACTIVE = "active"
+    LISTENING = "listening"
     THINKING = "thinking"
+    SPEAKING = "speaking"
+    ERROR = "error"
 
 
 class StateManager:
@@ -44,8 +49,8 @@ class StateManager:
 
     @property
     def pending_sleep(self) -> bool:
-        """True when sleep was requested during THINKING and will apply
-        as soon as thinking ends."""
+        """True when sleep was requested during a busy state and will apply
+        as soon as the current work finishes."""
         with self._lock:
             return self._pending_sleep
 
@@ -66,22 +71,22 @@ class StateManager:
                 pass
         return True
 
-    # -- transitions ----------------------------------------------------
+    # -- lifecycle ------------------------------------------------------
     def wake(self) -> AppState:
-        """SLEEPING -> ACTIVE (no-op if already awake). Clears pending sleep."""
+        """Anything -> ACTIVE. Clears pending sleep."""
         with self._lock:
             self._pending_sleep = False
         self._set(AppState.ACTIVE)
         return self.state
 
     def sleep(self) -> AppState:
-        """ACTIVE -> SLEEPING.
+        """Go to SLEEPING.
 
-        If THINKING, the sleep is *pending*: it applies automatically when
-        the current response finishes (GOJO finishes its sentence, then
-        goes down — never cut off mid-thought).
+        If busy (LISTENING / THINKING / SPEAKING), the sleep is *pending*:
+        it applies automatically when the current work finishes (GOJO never
+        cuts itself off mid-thought or mid-sentence).
         """
-        if self.state is AppState.THINKING:
+        if self.state in (AppState.LISTENING, AppState.THINKING, AppState.SPEAKING):
             with self._lock:
                 self._pending_sleep = True
             return self.state
@@ -90,9 +95,39 @@ class StateManager:
         self._set(AppState.SLEEPING)
         return self.state
 
-    def begin_thinking(self) -> AppState:
-        """ACTIVE -> THINKING. Only from ACTIVE (sleeping must wake first)."""
+    # -- voice states (Phase 3) ------------------------------------------
+    def begin_listening(self) -> AppState:
+        """ACTIVE -> LISTENING. Only from ACTIVE (sleeping must wake first)."""
         if self.state is AppState.ACTIVE:
+            self._set(AppState.LISTENING)
+        return self.state
+
+    def stop_listening(self) -> AppState:
+        """LISTENING -> ACTIVE (recording cancelled / nothing captured)."""
+        if self.state is AppState.LISTENING:
+            self._set(AppState.ACTIVE)
+        return self.state
+
+    def begin_speaking(self) -> AppState:
+        """ACTIVE -> SPEAKING (TTS audio is playing)."""
+        if self.state is AppState.ACTIVE:
+            self._set(AppState.SPEAKING)
+        return self.state
+
+    def end_speaking(self) -> AppState:
+        """SPEAKING -> SLEEPING (if sleep was pending) else ACTIVE."""
+        if self.state is not AppState.SPEAKING:
+            return self.state
+        with self._lock:
+            pending = self._pending_sleep
+            self._pending_sleep = False
+        self._set(AppState.SLEEPING if pending else AppState.ACTIVE)
+        return self.state
+
+    # -- thinking ---------------------------------------------------------
+    def begin_thinking(self) -> AppState:
+        """ACTIVE or LISTENING -> THINKING. Sleeping must wake first."""
+        if self.state in (AppState.ACTIVE, AppState.LISTENING):
             self._set(AppState.THINKING)
         return self.state
 
@@ -104,4 +139,16 @@ class StateManager:
             pending = self._pending_sleep
             self._pending_sleep = False
         self._set(AppState.SLEEPING if pending else AppState.ACTIVE)
+        return self.state
+
+    # -- error (transient) ------------------------------------------------
+    def flash_error(self) -> AppState:
+        """Mark a visible error. The pipeline always clears it afterwards."""
+        if self.state not in (AppState.SLEEPING, AppState.ERROR):
+            self._set(AppState.ERROR)
+        return self.state
+
+    def clear_error(self) -> AppState:
+        if self.state is AppState.ERROR:
+            self._set(AppState.ACTIVE)
         return self.state
