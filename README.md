@@ -45,10 +45,19 @@ dependency.
   the mic this phase, per spec.
 
 **Phase 4 — this build:** real wake-word detection ("Hey Gojo").
-- [x] Say **"Hey Gojo"**, **"Hi Gojo"** or **"Hello Gojo"** and GOJO wakes
-  from sleep: beep + "Gojo? Bolo." → listens → your command goes through
-  the **same shared voice → brain → reply → TTS pipeline** → GOJO sleeps
-  again and keeps listening. "Gojo, sleep" also works by voice.
+- [x] Say **"Hey Gojo"**, **"Hi Gojo"**, **"Hello Gojo"**, **"Wake up
+  Gojo"** or **"Yo Gojo"** and GOJO wakes from sleep: beep + "Gojo? Bolo."
+  → listens → your command goes through the **same shared voice → brain →
+  reply → TTS pipeline** → GOJO sleeps again and keeps listening.
+  "Gojo, sleep" also works by voice.
+- [x] **Configurable microphone device** (`.env` → `GOJO_MIC_DEVICE`):
+  empty = system default input; or a device NAME/INDEX — required for
+  virtual mics like **AudioRelay** (they are NOT the system default).
+  Settings → Voice shows the Mic in use + a **Test** button (reports the
+  device + level — nothing is recorded or stored).
+- [x] **Power button is now a true ON/OFF switch** (Phase 4 semantics):
+  fully down → wakes; "wake listening" → fully down (stops the listener);
+  awake → sleeps (wake listening resumes if enabled).
 - [x] 100% local detection: a small (tiny, ~75 MB) local Whisper model
   scans short audio windows on your CPU — **no audio ever leaves your PC**
   during wake listening. Gemini/Fish are only touched AFTER a wake.
@@ -150,12 +159,18 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
   Settings → Voice → "Reply with voice" is on.
 - **Saying "Hey Gojo" does nothing:** (1) Settings → Voice → "Wake word"
   must be ticked and the pill must say **wake listening** (not just
-  sleeping); (2) mic permission — Windows Settings → Privacy →
-  Microphone → allow desktop apps; (3) say it clearly, ~0.5–1 m from the
-  mic, in a reasonably quiet room; (4) first time adds ~2–3 s detection
-  latency (2 s window + local inference) and downloads the ~75 MB model
-  once; (5) try "Hello Gojo" if "Hey Gojo" is being missed — all three
-  phrases are supported and ASR varies by speaker.
+  sleeping); (2) **check the Mic row + Test button** — GOJO listens to
+  the device from `.env` (`GOJO_MIC_DEVICE`, empty = system default).
+  If your phone mic comes in through **AudioRelay**, that virtual device
+  is NOT the default input: list devices with
+  `python -c "import sounddevice as sd; print(sd.query_devices())"` and
+  set `GOJO_MIC_DEVICE` to its name or index, then restart; (3) mic
+  permission — Windows Settings → Privacy → Microphone → allow desktop
+  apps; (4) say it clearly, ~0.5–1 m from the mic, in a reasonably quiet
+  room; (5) first time adds ~2–3 s detection latency (2 s window + local
+  inference) and downloads the ~75 MB model once; (6) try "Hello Gojo" /
+  "Wake up Gojo" / "Yo Gojo" — all five phrases are supported and ASR
+  varies by speaker.
 - **GOJO wakes when it shouldn't:** the detector is local and fuzzy by
   design (it tolerates mis-recognized "gojo"); the false-wake cost is one
   "I didn't catch that" and it goes back to listening. If it's a nuisance

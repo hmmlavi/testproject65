@@ -509,6 +509,7 @@ body.tr-open .transcript { transform: translateX(0); }
   transition: color 0.15s, border-color 0.15s, background 0.15s;
 }
 .btn:hover { color: var(--text); border-color: var(--line-strong); }
+.btn.tiny { padding: 3px 10px; font-size: 11px; }
 .btn.danger { color: var(--danger); border-color: rgba(217, 138, 138, 0.28); }
 .btn.danger:hover { background: rgba(217, 138, 138, 0.1); border-color: rgba(217, 138, 138, 0.5); }
 

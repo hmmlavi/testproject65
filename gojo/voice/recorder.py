@@ -40,8 +40,11 @@ class VoiceRecorder:
         silence_seconds: float = 1.2,
         max_seconds: float = 60.0,
         min_seconds: float = 0.8,
+        device_spec: str = "",
     ) -> None:
         self._stream_factory = stream_factory  # None -> real sounddevice
+        self._device_spec = (device_spec or "").strip()  # GOJO_MIC_DEVICE
+        self._last_device = ""
         self._sr = sample_rate
         self._silence_rms = silence_rms
         self._silence_seconds = silence_seconds
@@ -61,6 +64,12 @@ class VoiceRecorder:
     @property
     def recording(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def last_device(self) -> str:
+        """Name+index of the device the last real capture used ('' if none
+        yet or a fake stream factory was injected)."""
+        return self._last_device
 
     def start(self) -> None:
         """Open the mic and start capturing (background thread)."""
@@ -107,10 +116,11 @@ class VoiceRecorder:
             if self._stream_factory is not None:
                 stream = self._stream_factory()
             else:
-                import sounddevice as sd
-                stream = sd.InputStream(
-                    samplerate=self._sr, channels=1, dtype="float32"
-                )
+                from . import devices
+
+                stream, dev = devices.open_input_stream(self._device_spec, self._sr)
+                self._last_device = f"{dev['name']} (index {dev['index']})"
+                logger.info("recording from: %s", self._last_device)
         except Exception as exc:  # noqa: BLE001 — no mic, no PortAudio, permissions...
             self._fatal = f"No microphone available: {exc}"
             self._finish()

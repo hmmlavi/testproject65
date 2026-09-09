@@ -149,6 +149,31 @@ state is SLEEPING. Every transition calls sync: power wake/sleep, spoken
 detection never runs while GOJO is awake (nothing to wake, and it keeps
 "Hey Gojo" said mid-conversation from triggering a re-listen).
 
+### Input device is explicit, never guessed
+Both the recorder and the wake listener open the device from
+`GOJO_MIC_DEVICE` (`.env`): empty = system default input, else an index
+or a name (case-insensitive exact, then unique substring — ambiguous or
+missing names fail with a readable list of available devices; there is
+NO silent fallback to an arbitrary device, because virtual cable mics
+like AudioRelay are NOT the system default and a silent wrong choice is
+exactly the "wake word never works" bug this fixes). Resolution logic
+lives in `voice/devices.py` as a pure function (device list injectable →
+unit-tested without hardware). Settings → Voice surfaces the device in
+use (`mic_info`) and a Test button (`test_mic`) that reports device +
+frame count + peak level for ~1.2 s — level stats only, no audio is
+stored or sent anywhere. The listener also counts `frames_seen` (the
+"are samples actually arriving?" signal) and logs the resolved device at
+each start.
+
+### Power button semantics (Phase 4)
+The UI power button is an ON/OFF switch: fully down (sleeping, no
+listener) → WAKE; "wake listening" (sleeping + listener) → FULLY DOWN
+(stops the listener and sets `always_listening` off — visible in
+Settings); anything else → SLEEP (listener re-arms automatically only if
+the setting is still on). Phase 3 bug that motivated this: "wake
+listening" is `data-state="sleeping"`, so the old toggle sent `wake`
+when the user pressed it expecting sleep.
+
 ### Wake turn contract: one turn per wake
 On detection: SLEEPING→ACTIVE → local beep (`winsound.Beep`, 150 ms,
 injectable) + "Gojo? Bolo." note (the ack is local — no network) → mic

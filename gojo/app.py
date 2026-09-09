@@ -95,7 +95,11 @@ def create_app(settings: Settings | None = None):
     AudioPlayer.sweep_stale(settings.data_dir / "audio")
     pipeline = VoicePipeline(
         state=state,
-        recorder=VoiceRecorder(),
+        # device_spec: GOJO_MIC_DEVICE from .env ('' = system default input).
+        # Virtual mics (e.g. AudioRelay) are NOT the default input, so a
+        # phone-mic setup must name the device explicitly — the Settings
+        # panel shows which device GOJO actually uses + a Test button.
+        recorder=VoiceRecorder(device_spec=settings.mic_device),
         stt=WhisperSTT(settings.stt_model_size),
         tts=TTSRouter(
             [
@@ -113,6 +117,7 @@ def create_app(settings: Settings | None = None):
         prefs=prefs,
         on_note=api._set_note,
         audio_dir=settings.data_dir / "audio",
+        mic_device=settings.mic_device,
     )
     api.attach_voice(pipeline)
     # Phase 4: if the user previously opted into always-listening, resume

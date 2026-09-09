@@ -46,6 +46,8 @@ const els = {
   setFishVoice: $("setFishVoice"),
   setFishStatus: $("setFishStatus"),
   setSttModel: $("setSttModel"),
+  setMic: $("setMic"),
+  btnMicTest: $("btnMicTest"),
   btnModalClose: $("btnModalClose"),
   btnModalDone: $("btnModalDone"),
   btnClearData: $("btnClearData"),
@@ -61,6 +63,7 @@ let transcriptOpen = false;
 let lastResponse = false; // has GOJO replied in this session?
 let voiceEnabled = false; // from get_voice_settings
 let wasVoiceBusy = false; // previous status.busy (voice turn in flight)
+let wakeListening = false; // status.wake_listening (local listener running)
 
 const IDLE_TEXT = {
   sleeping: "· · · sleeping · · ·",
@@ -152,9 +155,10 @@ async function applyStatus(status) {
   if (!status) return;
   const state = status.state;
   els.body.dataset.state = state;
+  wakeListening = !!status.wake_listening;
   // "sleeping + local wake listener on" shows as one combined status
   els.statusText.textContent =
-    state === "sleeping" && status.wake_listening ? "wake listening" : PILL_TEXT[state] || state;
+    state === "sleeping" && wakeListening ? "wake listening" : PILL_TEXT[state] || state;
 
   const sleeping = state === "sleeping";
   const listening = state === "listening";
@@ -375,7 +379,29 @@ async function loadVoiceSettings() {
     ? "ready"
     : "missing — add FISH_AUDIO_API_KEY in .env";
   els.setSttModel.textContent = v.stt_model || "—";
+  if (v.mic) {
+    els.setMic.textContent = v.mic.in_use || "—";
+    els.setMic.title = `configured: ${v.mic.configured} (GOJO_MIC_DEVICE in .env)`;
+  }
   refreshStatus();
+}
+
+function onMicTest() {
+  toast("Mic test — speak now… (~1 s, level only, nothing is recorded)");
+  callApi("test_mic")
+    .then((r) => {
+      if (r.ok) {
+        const quiet =
+          r.peak < 0.003
+            ? " — very quiet: speak closer, or check GOJO_MIC_DEVICE in .env"
+            : "";
+        toast(`Mic OK: ${r.device} · ${r.frames} samples · peak ${r.peak}${quiet}`);
+      } else {
+        toast(r.error || "Mic test failed", true);
+      }
+      loadVoiceSettings().catch(() => {});
+    })
+    .catch(() => {});
 }
 
 function saveVoicePref(key, value) {
@@ -403,13 +429,28 @@ async function onClearData() {
 /* ------------------------------------------------------------------ */
 
 function onPower() {
-  const sleeping = els.body.dataset.state === "sleeping";
-  // explicit calls (not a ternary) so the wiring test can see both names
-  const call = sleeping ? callApi("wake") : callApi("sleep");
+  const st = els.body.dataset.state;
+  // Phase 4 semantics — the button is a true ON/OFF switch:
+  //  - fully down (sleeping, no listener)      -> WAKE
+  //  - "wake listening" (sleeping + listener)  -> FULLY DOWN: stops the
+  //    local listener and turns the always-listening setting off (visible
+  //    in Settings; re-enable via the toggle or "Gojo, always listening on")
+  //  - anything else (awake/listening/thinking/speaking) -> SLEEP
+  //    (wake listening resumes automatically only if the setting is on)
+  const fullyOff = st === "sleeping" && !wakeListening;
+  // explicit calls (not a ternary) so the wiring test can see each name
+  let call;
+  if (fullyOff) {
+    call = callApi("wake");
+  } else if (st === "sleeping" && wakeListening) {
+    call = callApi("set_voice_pref", "always_listening", false);
+  } else {
+    call = callApi("sleep");
+  }
   call
     .then(() => refreshStatus())
     .catch(() => {});
-  if (!sleeping) toast("GOJO is going to sleep…");
+  if (!fullyOff) toast("GOJO is going to sleep…");
 }
 
 function onQuit() {
@@ -463,6 +504,7 @@ els.setAutoplay.addEventListener("change", (e) => {
 els.setProvider.addEventListener("change", (e) => {
   saveVoicePref("tts_provider", e.target.value);
 });
+els.btnMicTest.addEventListener("click", onMicTest);
 els.modal.addEventListener("click", (e) => {
   if (e.target === els.modal) closeSettings();
 });

@@ -65,6 +65,7 @@ class VoicePipeline:
         wake_engine: Optional[WakeWordEngine] = None,
         wake_stream_factory: Optional[Callable[[], object]] = None,
         ack_fn: Optional[Callable[[], None]] = None,
+        mic_device: str = "",
     ) -> None:
         self._state = state
         self._recorder = recorder
@@ -79,12 +80,38 @@ class VoicePipeline:
         self._running = False
         self._ack_fn = ack_fn or _default_ack
         self._mic_warned = False
+        self._mic_device = (mic_device or "").strip()
         # Phase 4: local wake listener (off until the user opts in)
         self._listener = WakeListener(
             wake_engine or build_wakeword_engine(),
             on_wake=self._on_wake,
             stream_factory=wake_stream_factory,
+            device_spec=self._mic_device,
         )
+
+    # ------------------------------------------------------------------
+    # microphone device (debug aid — no audio is stored or sent anywhere)
+    # ------------------------------------------------------------------
+    def test_mic(self) -> dict:
+        """Open the configured microphone for ~1.2 s and report which
+        device it is + level stats (frames, peak). Read-only: nothing is
+        recorded, saved, or transmitted."""
+        from . import devices
+
+        try:
+            return devices.read_peak(self._mic_device, seconds=1.2)
+        except devices.MicDeviceError as exc:
+            return {"ok": False, "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"Microphone test failed: {exc}"}
+
+    def mic_info(self) -> dict:
+        return {
+            "configured": self._mic_device or "system default",
+            "in_use": self._listener.last_device or self._recorder.last_device
+            or "not opened yet",
+            "listener_frames": self._listener.frames_seen,
+        }
 
     @property
     def tts(self) -> TTSRouter:

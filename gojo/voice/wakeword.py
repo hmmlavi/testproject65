@@ -51,11 +51,17 @@ import numpy as np
 
 logger = logging.getLogger("gojo.voice.wakeword")
 
-WAKE_PHRASES = ("hey gojo", "hi gojo", "hello gojo")
+WAKE_PHRASES = (
+    "hey gojo",
+    "hi gojo",
+    "hello gojo",
+    "wake up gojo",
+    "yo gojo",
+)
 
-# Greeting variants Whisper tends to produce for the three wake phrases.
+# Greeting variants Whisper tends to produce for the wake phrases.
 _WAKE_GREETINGS = frozenset(
-    {"hey", "hi", "hello", "hii", "hiiiii", "hay", "haio", "he", "helo", "hais"}
+    {"hey", "hi", "hello", "hii", "hiiiii", "hay", "haio", "he", "helo", "hais", "yo"}
 )
 _GOJO_SPLIT_A = frozenset({"go", "goh", "goy"})  # "go jo" — split across tokens
 _GOJO_SPLIT_B = frozenset({"jo"})
@@ -94,12 +100,17 @@ def _normalize(transcript: str) -> str:
 def _canonical_phrase(tokens: list[str], idx: int) -> str:
     """Map a found "gojo" to the nearest canonical wake phrase, using a
     greeting within the two preceding tokens when one exists."""
-    for g in reversed(tokens[max(0, idx - 2) : idx]):
+    window = tokens[max(0, idx - 2) : idx]
+    if "wake" in window:
+        return "wake up gojo"
+    for g in reversed(window):
         if g in _WAKE_GREETINGS:
             if g.startswith("hello") or g == "helo":
                 return "hello gojo"
             if g.startswith("hi"):
                 return "hi gojo"
+            if g == "yo":
+                return "yo gojo"
             return "hey gojo"
     return "hey gojo"  # greeting optional — ASR drops it often
 
@@ -266,20 +277,36 @@ class WakeListener:
         stream_factory: Optional[Callable[[], object]] = None,
         sr: int = 16000,
         frame_ms: int = 250,
+        device_spec: str = "",
     ) -> None:
         self._engine = engine
         self._on_wake = on_wake
         self._stream_factory = stream_factory
         self._sr = sr
         self._frame = max(1, int(sr * frame_ms / 1000))
+        self._device_spec = (device_spec or "").strip()  # GOJO_MIC_DEVICE
         self._stop_event = threading.Event()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._last_device = ""
+        self._frames_seen = 0
 
     @property
     def running(self) -> bool:
         with self._lock:
             return self._thread is not None and self._thread.is_alive()
+
+    @property
+    def last_device(self) -> str:
+        """Name+index of the device the last real listener used ('' if none
+        yet or a fake stream factory was injected)."""
+        return self._last_device
+
+    @property
+    def frames_seen(self) -> int:
+        """Audio frames received by the (last) listener run — proof that
+        samples are actually arriving from the device."""
+        return self._frames_seen
 
     def start(self) -> dict:
         """Open the mic and start detecting. Returns {"ok": bool, ...}."""
@@ -292,18 +319,23 @@ class WakeListener:
             if self._stream_factory is not None:
                 stream = self._stream_factory()
             else:
-                import sounddevice as sd  # heavy: only when actually listening
+                from . import devices
 
-                stream = sd.InputStream(samplerate=self._sr, channels=1, dtype="float32")
+                stream, dev = devices.open_input_stream(self._device_spec, self._sr)
+                self._last_device = f"{dev['name']} (index {dev['index']})"
         except Exception as exc:  # noqa: BLE001 — no mic / no PortAudio / blocked
             return {"ok": False, "error": f"No microphone available: {exc}"}
+        self._frames_seen = 0
         thread = threading.Thread(
             target=self._run, args=(stream,), name="gojo-wakeword", daemon=True
         )
         with self._lock:
             self._thread = thread
         thread.start()
-        logger.info("wake listener started (local-only)")
+        logger.info(
+            "wake listener started (local-only) on: %s",
+            self._last_device or "injected stream (test)",
+        )
         return {"ok": True}
 
     def _run(self, stream) -> None:
@@ -311,6 +343,7 @@ class WakeListener:
             with stream:
                 while not self._stop_event.is_set():
                     data, _overflow = stream.read(self._frame)
+                    self._frames_seen += 1
                     if self._stop_event.is_set():
                         break
                     phrase = self._engine.add_frame(np.asarray(data).flatten())

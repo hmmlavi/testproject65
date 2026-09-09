@@ -113,6 +113,8 @@ class FileTTS(TTSProvider):
 class ScriptedRecorder:
     """No threads: returns a fixed (good) recording after a short busy window."""
 
+    last_device = ""  # same attribute the real VoiceRecorder exposes
+
     def __init__(self, ok: bool = True, error: str | None = None) -> None:
         self._ok = ok
         self._error = error
@@ -185,7 +187,11 @@ def test_matcher_required_phrases() -> None:
     assert match_wake_phrase("Hey Gojo") == "hey gojo"
     assert match_wake_phrase("Hi Gojo") == "hi gojo"
     assert match_wake_phrase("Hello Gojo") == "hello gojo"
-    assert set(WAKE_PHRASES) == {"hey gojo", "hi gojo", "hello gojo"}
+    assert match_wake_phrase("Wake up Gojo") == "wake up gojo"
+    assert match_wake_phrase("Yo Gojo") == "yo gojo"
+    assert set(WAKE_PHRASES) == {
+        "hey gojo", "hi gojo", "hello gojo", "wake up gojo", "yo gojo",
+    }
     print("PASS test_matcher_required_phrases")
 
 
@@ -200,7 +206,9 @@ def test_matcher_asr_variants() -> None:
         "hey gogo": "hey gojo",           # edit-distance-1
         "heygojo": "hey gojo",            # fused without space
         "gojo": "hey gojo",               # bare name still wakes (strong signal)
-        "wake up gojo": "hey gojo",       # classic variant
+        "yo, gojo": "yo gojo",            # punctuation
+        "wake up, GOJO": "wake up gojo",  # classic variant
+        "wake gojo": "wake up gojo",      # lenient "wake" prefix
         "  Hey   Gojo  ": "hey gojo",     # whitespace noise
     }
     for text, want in variants.items():
@@ -288,8 +296,76 @@ def test_engine_model_size_is_capped() -> None:
 
 
 # ---------------------------------------------------------------------
+# 2b. input device selection (pure logic — no audio hardware needed)
+# ---------------------------------------------------------------------
+
+
+def test_resolve_input_device_pure() -> None:
+    from gojo.voice.devices import MicDeviceError, resolve_input_device
+
+    devs = [
+        {"index": 0, "name": "Microphone (Realtek(R) Audio)", "channels": 2},
+        {"index": 2, "name": "CABLE 01 (AudioRelay)", "channels": 2},
+    ]
+    # empty spec -> system default
+    assert resolve_input_device("", devs, default_index=2)["name"] == "CABLE 01 (AudioRelay)"
+    # no default -> actionable error listing available devices
+    try:
+        resolve_input_device("", devs, default_index=-1)
+        raise AssertionError("must fail without a default")
+    except MicDeviceError as exc:
+        assert "GOJO_MIC_DEVICE" in str(exc) and "AudioRelay" in str(exc)
+    # explicit index
+    assert resolve_input_device("2", devs)["index"] == 2
+    try:
+        resolve_input_device("9", devs)
+        raise AssertionError("bad index must fail")
+    except MicDeviceError as exc:
+        assert "available" in str(exc)
+    # exact name, case-insensitive
+    assert resolve_input_device("cable 01 (audiorelay)", devs)["index"] == 2
+    # unique substring
+    assert resolve_input_device("audiorelay", devs)["index"] == 2
+    # ambiguous substring -> refuses to guess
+    devs2 = devs + [{"index": 6, "name": "AudioRelay OUT", "channels": 1}]
+    try:
+        resolve_input_device("audiorelay", devs2)
+        raise AssertionError("ambiguous name must fail")
+    except MicDeviceError as exc:
+        assert "matches several" in str(exc)
+    # not found -> lists what IS available
+    try:
+        resolve_input_device("does-not-exist", devs)
+        raise AssertionError("unknown name must fail")
+    except MicDeviceError as exc:
+        assert "not found" in str(exc) and "AudioRelay" in str(exc)
+    # no devices at all
+    try:
+        resolve_input_device("", [], default_index=0)
+        raise AssertionError("must fail with zero devices")
+    except MicDeviceError as exc:
+        assert "no input devices" in str(exc)
+    print("PASS test_resolve_input_device_pure")
+
+
+# ---------------------------------------------------------------------
 # 3. listener: mic handling, callback, clean shutdown
 # ---------------------------------------------------------------------
+
+
+def test_listener_reports_frames_arriving() -> None:
+    """The frames_seen counter is the 'are samples actually arriving?'
+    signal (no audio is stored — just a count)."""
+    listener = WakeListener(FakeWakeEngine(), on_wake=lambda p: None,
+                            stream_factory=FakeStreamFactory())
+    listener.start()
+    time.sleep(0.15)
+    assert listener.frames_seen > 0, "frames must arrive while running"
+    listener.stop()
+    frozen = listener.frames_seen
+    time.sleep(0.05)
+    assert listener.frames_seen == frozen, "a stopped listener must not receive frames"
+    print("PASS test_listener_reports_frames_arriving")
 
 
 def test_listener_no_mic_is_a_clean_error() -> None:
@@ -553,6 +629,90 @@ def test_status_exposes_wake_listening() -> None:
 
 
 # ---------------------------------------------------------------------
+# 5b. microphone device surfacing + test (debug aid)
+# ---------------------------------------------------------------------
+
+
+def test_pipeline_test_mic_graceful() -> None:
+    """test_mic must ALWAYS return a readable dict — on the user's PC it
+    opens the real device for ~1.2 s; here (no PortAudio) it must fail
+    gracefully with a reason, never crash."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _build(Path(tmp), trigger_after=None)
+        r = b["pipeline"].test_mic()
+        assert isinstance(r, dict) and "ok" in r
+        if not r["ok"]:
+            assert r.get("error"), "failure must carry a readable reason"
+        print("PASS test_pipeline_test_mic_graceful")
+
+
+def test_mic_info_in_voice_settings() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _build(Path(tmp), trigger_after=999)
+        vs = b["api"].get_voice_settings()
+        assert vs["mic"]["configured"] == "system default"
+        assert "in_use" in vs["mic"] and "listener_frames" in vs["mic"]
+        b["pipeline"].set_always_listening(True)
+        time.sleep(0.15)
+        vs2 = b["api"].get_voice_settings()
+        assert vs2["mic"]["listener_frames"] > 0, "frames counter must move"
+        b["pipeline"].set_always_listening(False)
+    print("PASS test_mic_info_in_voice_settings")
+
+
+# ---------------------------------------------------------------------
+# 5c. power / sleep button regression (bridge-level path of the UI fix)
+# ---------------------------------------------------------------------
+
+
+def test_power_semantics_sleep_path() -> None:
+    """The fixed power-button path, at the bridge level:
+    - awake + listener ON  -> sleep()  -> sleeping WITH listener (wake listening)
+    - 'power' from wake listening -> set_voice_pref(always_listening, False)
+      -> FULLY DOWN (listener stopped, state sleeping)
+    - 'power' from fully down -> wake() -> active
+    - awake + listener OFF -> sleep() -> fully down
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _build(Path(tmp), trigger_after=999)
+        api, state, p = b["api"], b["state"], b["pipeline"]
+
+        api.wake()
+        p.set_always_listening(True)
+        api.sleep()
+        assert state.state is AppState.SLEEPING and p.listener_running is True
+
+        r = api.set_voice_pref("always_listening", False)  # the power-button call
+        assert r["ok"] is True
+        assert state.state is AppState.SLEEPING
+        assert p.listener_running is False, "wake listening must stop on power-off"
+        assert b["prefs"].get("always_listening") is False
+
+        api.wake()
+        assert state.state is AppState.ACTIVE and p.listener_running is False
+
+        api.sleep()
+        assert state.state is AppState.SLEEPING and p.listener_running is False
+    print("PASS test_power_semantics_sleep_path")
+
+
+def test_sleep_command_still_works_with_listener_on() -> None:
+    """'gojo, sleep' via the brain path while opted in: ends sleeping with
+    the listener re-armed (wake listening), not stuck anywhere."""
+    with tempfile.TemporaryDirectory() as tmp:
+        b = _build(Path(tmp), trigger_after=None, stt_text="gojo, sleep")
+        api, state, p = b["api"], b["state"], b["pipeline"]
+        p.set_always_listening(True)
+        api.wake()
+        r = api._run_turn("gojo, sleep", via="text")
+        assert r["kind"] == "command"
+        assert state.state is AppState.SLEEPING
+        assert p.listener_running is True  # re-armed: still opted in
+        p.set_always_listening(False)
+    print("PASS test_sleep_command_still_works_with_listener_on")
+
+
+# ---------------------------------------------------------------------
 # 6. real detector (runs where the tiny model can load; honest skip otherwise)
 # ---------------------------------------------------------------------
 
@@ -588,7 +748,9 @@ def main() -> int:
         test_engine_silence_never_transcribes,
         test_engine_tolerates_transcribe_errors,
         test_engine_model_size_is_capped,
+        test_resolve_input_device_pure,
         test_listener_no_mic_is_a_clean_error,
+        test_listener_reports_frames_arriving,
         test_listener_fires_callback_and_stops,
         test_listener_clean_shutdown,
         test_always_listening_default_off_and_privacy,
@@ -602,6 +764,10 @@ def main() -> int:
         test_wake_with_no_mic_is_friendly_and_recovers,
         test_press_to_talk_still_works_alongside_wake,
         test_status_exposes_wake_listening,
+        test_pipeline_test_mic_graceful,
+        test_mic_info_in_voice_settings,
+        test_power_semantics_sleep_path,
+        test_sleep_command_still_works_with_listener_on,
         test_real_engine_silence_and_noise_never_wake,
     ]
     failures = 0

@@ -125,6 +125,14 @@
       <div class="set-row"><span class="set-label">Fish voice</span><span class="set-value small" id="setFishVoice" title="">—</span></div>
       <div class="set-row"><span class="set-label">Fish key</span><span class="set-value small" id="setFishStatus">—</span></div>
       <div class="set-row"><span class="set-label">Speech-to-text</span><span class="set-value small" id="setSttModel">—</span></div>
+      <div class="set-row">
+        <span class="set-label" title="Input device from .env (GOJO_MIC_DEVICE). Empty = system default input. Virtual mics (e.g. AudioRelay) must be named there.">Mic</span>
+        <span class="set-value small" id="setMic" title="">—</span>
+      </div>
+      <div class="set-row">
+        <span class="set-label">Mic test</span>
+        <button class="btn tiny" id="btnMicTest" title="Reads ~1 s of audio and reports level only — nothing is recorded or stored">Test</button>
+      </div>
 
       <div class="modal-actions">
         <button class="btn danger" id="btnClearData" title="Deletes all saved conversations">Clear all data</button>

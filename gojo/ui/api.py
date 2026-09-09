@@ -203,6 +203,13 @@ class GojoAPI:
             return {"ok": False, "error": "Voice system not initialized."}
         return self._voice.stop_talk()
 
+    def test_mic(self) -> dict:
+        """Debug: which device does GOJO use, and are samples arriving?
+        Reads ~1.2 s of level-only stats; nothing is recorded or stored."""
+        if self._voice is None:
+            return {"ok": False, "error": "Voice system not initialized."}
+        return self._voice.test_mic()
+
     # ------------------------------------------------------------------
     # transcript
     # ------------------------------------------------------------------
@@ -256,6 +263,11 @@ class GojoAPI:
             "tts_provider": self._prefs.get("tts_provider"),
             "always_listening": bool(self._prefs.get("always_listening")),
             "wake_listening": self._voice.listener_running if self._voice else False,
+            "mic": self._voice.mic_info() if self._voice else {
+                "configured": s.mic_device or "system default",
+                "in_use": "not opened yet",
+                "listener_frames": 0,
+            },
             "fish_configured": bool(
                 fish_key and not fish_key.strip().lower().startswith("paste-")
             ),

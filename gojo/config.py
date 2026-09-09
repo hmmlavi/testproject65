@@ -40,6 +40,7 @@ class Settings:
     fish_model_id: str = "0a7bf4b832b2459eb012547b4e3643d3"
     fish_model: str = "s2.1-pro-free"  # goes in the "model" HTTP header
     stt_model_size: str = "small"  # whisper: tiny | base | small (CPU-friendly)
+    mic_device: str = ""  # '' = system default input; else device name or index
 
 
 def load_settings() -> Settings:
@@ -58,4 +59,5 @@ def load_settings() -> Settings:
         fish_model_id=os.getenv("FISH_AUDIO_MODEL_ID", "0a7bf4b832b2459eb012547b4e3643d3").strip(),
         fish_model=os.getenv("FISH_AUDIO_MODEL", "s2.1-pro-free").strip(),
         stt_model_size=os.getenv("GOJO_STT_MODEL", "small").strip().lower(),
+        mic_device=os.getenv("GOJO_MIC_DEVICE", "").strip(),
     )
