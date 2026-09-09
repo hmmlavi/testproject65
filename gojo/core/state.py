@@ -10,8 +10,9 @@ States:
     SPEAKING   — TTS audio playing (Phase 3).
     ERROR      — transient failure flag; always auto-cleared to ACTIVE.
 
-Phase 4 will add wake-word listening on top (continuous listening stays
-off unless the user explicitly enables it — privacy default).
+Phase 4 wake-word listening does NOT add a state: "wake listening" is
+derived in the UI as (state == SLEEPING AND local listener running) —
+continuous listening stays off unless the user explicitly enables it.
 
 Thread-safe: the UI bridge and the voice pipeline call this from other
 threads while chat processing runs.

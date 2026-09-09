@@ -115,6 +115,9 @@ def create_app(settings: Settings | None = None):
         audio_dir=settings.data_dir / "audio",
     )
     api.attach_voice(pipeline)
+    # Phase 4: if the user previously opted into always-listening, resume
+    # the LOCAL wake listener at boot (GOJO boots SLEEPING). Off by default.
+    pipeline.sync_wake()
 
     window = webview.create_window(
         title="GOJO",

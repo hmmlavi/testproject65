@@ -1,9 +1,11 @@
 """Tiny user-preference store (data/gojo_prefs.json).
 
 For the few settings the user can flip at runtime from the settings panel:
-    voice_enabled   (bool)
-    tts_autoplay    (bool)
-    tts_provider    ("auto" | "fish" | "windows")
+    voice_enabled      (bool)
+    tts_autoplay       (bool)
+    tts_provider       ("auto" | "fish" | "windows")
+    always_listening   (bool) — Phase 4: local wake-word detection opt-in
+                            (default OFF; fully local, nothing is uploaded)
 
 Defaults are seeded from .env (Settings); the JSON file only stores
 overrides. Secrets and .env-only values (API keys, model IDs) NEVER live
@@ -23,6 +25,7 @@ _PREF_SCHEMA: dict[str, tuple[type, Any]] = {
     "voice_enabled": (bool, True),
     "tts_autoplay": (bool, True),
     "tts_provider": (str, "auto"),
+    "always_listening": (bool, False),  # privacy default: OFF
 }
 
 

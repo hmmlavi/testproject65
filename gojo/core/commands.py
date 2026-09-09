@@ -1,12 +1,14 @@
 """Direct-command detection — tiny, honest, tested.
 
-Phase 2 recognizes only lifecycle commands from typed text:
-    "sleep"  -> GOJO goes to sleep
-    "wake"   -> GOJO wakes up
+Recognized from short imperative messages (typed OR transcribed speech):
+    "sleep"                -> GOJO goes to sleep
+    "wake"                 -> GOJO wakes up
+    "always listening on"  -> local wake-word detection ON  (Phase 4)
+    "always listening off" -> local wake-word detection OFF (Phase 4)
+                             ("wake word on/off" is an alias)
 
 This is deliberately a pattern matcher, not an NLU: small surface area,
-zero fake intelligence. It is the seed of the command layer the voice
-phase will reuse — the same function, voice transcript in, command out.
+zero fake intelligence.
 """
 from __future__ import annotations
 
@@ -32,15 +34,32 @@ _WAKE_PATTERNS = (
     r"\butho\b",
 )
 
+# Phase 4: checked FIRST — "wake word on" contains "wake" and must not be
+# parsed as the plain wake command.
+_LISTENING_PATTERNS = (
+    r"\balways listening\b",
+    r"\bwake ?word\b",
+)
+
 
 def detect_direct_command(text: str) -> str | None:
-    """Return "sleep" | "wake" | None for short imperative messages."""
+    """Return "sleep" | "wake" | "listening_on" | "listening_off" | None
+    for short imperative messages."""
     t = (text or "").lower().strip()
     if not t or len(t) > _MAX_COMMAND_LEN:
         return None
     # strip punctuation so "gojo, sleep." matches "\bsleep\b"
     t = re.sub(r"[^\w\s]", " ", t)
 
+    for pattern in _LISTENING_PATTERNS:
+        if re.search(pattern, t):
+            has_on = bool(re.search(r"\bon\b", t))
+            has_off = bool(re.search(r"\boff\b", t))
+            if has_on and not has_off:
+                return "listening_on"
+            if has_off and not has_on:
+                return "listening_off"
+            return None  # ambiguous ("...on off") — don't guess
     for pattern in _SLEEP_PATTERNS:
         if re.search(pattern, t):
             return "sleep"

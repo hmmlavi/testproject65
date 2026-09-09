@@ -1,22 +1,30 @@
-"""Voice pipeline (Phase 3): orchestrates the press-to-talk turn.
+"""Voice pipeline: orchestrates press-to-talk turns AND wake-word turns.
 
-Flow (spec):
+Press-to-talk flow (Phase 3):
     Talk button -> mic open (LISTENING) -> end-of-speech detected ->
     STT (faster-whisper, local) -> transcript -> SHARED brain path (the
     exact same _run_turn that text chat uses: command detection -> AI ->
     transcript) -> TTS (Fish -> local fallback) -> speakers (SPEAKING)
     -> back to idle.
 
+Wake-word flow (Phase 4, opt-in, local-only):
+    user says "Hey/Hi/Hello Gojo" while GOJO sleeps -> local detector
+    (voice/wakeword.py) -> GOJO wakes -> short beep + "Gojo? Bolo." ->
+    listens for the command -> SAME shared brain path -> speaks the
+    reply -> sleeps again and the local listener resumes.
+
 Rules:
 - runs on worker threads; the UI polls status (no UI-thread blocking)
 - every failure becomes a friendly one-line note (never a stack trace)
-- the microphone is only ever open during an explicit press-to-talk turn
+- the microphone is only open while GOJO is listening (press-to-talk or
+  wake-listening) — and wake-listening only when the user opted in
 """
 from __future__ import annotations
 
 import logging
 import threading
 from pathlib import Path
+from typing import Callable, Optional
 
 from ..core.state import AppState
 from ..prefs import Prefs
@@ -26,8 +34,20 @@ from .stt import STTError, WhisperSTT
 from .tts.base import TTSError
 from .tts.normalize import normalize_for_speech
 from .tts.router import TTSRouter
+from .wakeword import WakeListener, WakeWordEngine, build_wakeword_engine
 
 logger = logging.getLogger("gojo.voice.pipeline")
+
+
+def _default_ack() -> None:
+    """Short local beep (Windows). Never raises — the visual note alone
+    is a valid acknowledgement."""
+    try:
+        import winsound
+
+        winsound.Beep(880, 150)
+    except Exception:  # noqa: BLE001 — non-Windows / no audio device
+        pass
 
 
 class VoicePipeline:
@@ -42,6 +62,9 @@ class VoicePipeline:
         prefs: Prefs,
         on_note,
         audio_dir: Path,
+        wake_engine: Optional[WakeWordEngine] = None,
+        wake_stream_factory: Optional[Callable[[], object]] = None,
+        ack_fn: Optional[Callable[[], None]] = None,
     ) -> None:
         self._state = state
         self._recorder = recorder
@@ -54,6 +77,14 @@ class VoicePipeline:
         self._audio_dir = Path(audio_dir)
         self._lock = threading.Lock()
         self._running = False
+        self._ack_fn = ack_fn or _default_ack
+        self._mic_warned = False
+        # Phase 4: local wake listener (off until the user opts in)
+        self._listener = WakeListener(
+            wake_engine or build_wakeword_engine(),
+            on_wake=self._on_wake,
+            stream_factory=wake_stream_factory,
+        )
 
     @property
     def tts(self) -> TTSRouter:
@@ -67,6 +98,10 @@ class VoicePipeline:
     def busy(self) -> bool:
         with self._lock:
             return self._running
+
+    @property
+    def listener_running(self) -> bool:
+        return self._listener.running
 
     # ------------------------------------------------------------------
     # controls (called by the UI bridge)
@@ -100,7 +135,76 @@ class VoicePipeline:
             return self._running
 
     # ------------------------------------------------------------------
-    # the turn (worker thread)
+    # Phase 4: wake word (local, opt-in)
+    # ------------------------------------------------------------------
+    def set_always_listening(self, on: bool) -> None:
+        """Persist the opt-in and (re)start/stop the local listener.
+
+        Raises ValueError for bad values (the UI surfaces it).
+        """
+        self._prefs.set("always_listening", bool(on))
+        self.sync_wake()
+
+    def sync_wake(self) -> None:
+        """Start/stop the local listener to match current settings + state.
+
+        The listener runs ONLY when: always-listening is ON and GOJO is
+        SLEEPING (waking is the whole point; an awake GOJO saves the CPU).
+        """
+        want = bool(self._prefs.get("always_listening")) and self._state.state is AppState.SLEEPING
+        if want and not self.listener_running:
+            r = self._listener.start()
+            if r.get("ok"):
+                self._mic_warned = False
+            elif not self._mic_warned:
+                self._mic_warned = True
+                self._note("error", "Boss, mic nahi mil raha — wake word on nahi ho paaya.")
+        elif not want and self.listener_running:
+            self._listener.stop()
+
+    def _on_wake(self, phrase: str) -> None:
+        """Runs on the listener thread when a wake phrase is detected."""
+        if self._state.state is not AppState.SLEEPING:
+            return  # raced with a manual wake — ignore
+        with self._lock:
+            if self._running:
+                return  # a turn is already in progress — ignore
+        logger.info("wake word detected: %r", phrase)
+        self._state.wake()  # SLEEPING -> ACTIVE
+        self._ack()  # short local beep + visual note (never network, mic closed)
+        # open the mic for the command AFTER the beep, so the beep itself
+        # is never captured
+        self._state.begin_listening()  # ACTIVE -> LISTENING
+        self._recorder.start()
+        with self._lock:
+            self._running = True
+        # The turn runs on its OWN thread (same as press-to-talk): the
+        # listener thread below is about to exit, and re-arming the
+        # listener happens after the turn — if the turn ran on the
+        # listener thread, sync_wake() would see it still alive and
+        # never start a fresh listener.
+        threading.Thread(
+            target=self._turn,
+            kwargs={"after_turn": self._after_wake_turn},
+            daemon=True,
+        ).start()
+
+    def _ack(self) -> None:
+        self._note("info", "Gojo? Bolo.")
+        try:
+            self._ack_fn()
+        except Exception:  # noqa: BLE001 — a failed beep must not kill the turn
+            logger.exception("ack beep failed")
+
+    def _after_wake_turn(self) -> None:
+        """Wake-word contract: one turn per wake, then sleep — and the
+        local listener resumes (it only re-arms if still opted in)."""
+        if self._state.state is not AppState.SLEEPING:
+            self._state.sleep()
+        self.sync_wake()
+
+    # ------------------------------------------------------------------
+    # the turn (worker thread) — shared by press-to-talk AND wake turns
     # ------------------------------------------------------------------
     def _note(self, kind: str, message: str) -> None:
         try:
@@ -108,7 +212,7 @@ class VoicePipeline:
         except Exception:  # noqa: BLE001 — a broken note hook must not kill the turn
             logger.exception("note hook failed")
 
-    def _turn(self) -> None:
+    def _turn(self, after_turn: Optional[Callable[[], None]] = None) -> None:
         try:
             result = self._recorder.wait_result(timeout=180)
             if result is None or not result.ok or result.audio is None:
@@ -155,6 +259,11 @@ class VoicePipeline:
             with self._lock:
                 self._running = False
             self._state.clear_error()
+            if after_turn is not None:
+                try:
+                    after_turn()
+                except Exception:  # noqa: BLE001
+                    logger.exception("after-turn hook failed")
 
     def _speak(self, reply: str) -> None:
         self._state.begin_speaking()

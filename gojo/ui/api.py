@@ -33,6 +33,11 @@ logger = logging.getLogger("gojo.ui.api")
 # need the brain.
 SLEEP_ACK = "Ja raha hoon, boss. Power dabao ya 'wake up' bolo — main wapas aa jaunga."
 WAKE_ACK = "Main hoon. Kya karna hai?"
+LISTEN_ON_ACK = (
+    "Theek hai boss, ab main hamesha sunta rahunga. 'Hey Gojo' bolo — "
+    "main turant aa jaunga. (Sab kuch local hai, koi audio kahin nahi jaata.)"
+)
+LISTEN_OFF_ACK = "Done. Ab main tab aata hoon jab aap power dabao ya likho."
 
 
 class BrainError(Exception):
@@ -103,10 +108,14 @@ class GojoAPI:
     # ------------------------------------------------------------------
     def wake(self) -> dict:
         self._state.wake()
+        if self._voice is not None:
+            self._voice.sync_wake()  # an awake GOJO doesn't need the wake mic
         return {"ok": True, "status": self._status()}
 
     def sleep(self) -> dict:
         self._state.sleep()
+        if self._voice is not None:
+            self._voice.sync_wake()  # resume local wake listening if opted in
         return {"ok": True, "status": self._status()}
 
     # ------------------------------------------------------------------
@@ -136,10 +145,26 @@ class GojoAPI:
         command = detect_direct_command(text)
         if command and self._state.state is AppState.LISTENING:
             self._state.stop_listening()  # safety net for command path
+        if command in ("listening_on", "listening_off"):
+            # Phase 4: toggle the LOCAL wake-word listener. Persists in
+            # prefs, applies live; no brain, no network.
+            on = command == "listening_on"
+            try:
+                self._prefs.set("always_listening", on)
+            except ValueError:
+                return {"kind": "command", "reply": "Boss, yeh setting change nahi ho paayi."}
+            if self._voice is not None:
+                self._voice.sync_wake()
+            ack = LISTEN_ON_ACK if on else LISTEN_OFF_ACK
+            self._transcript.append("user", text, via=via)
+            self._transcript.append("model", ack, via="system")
+            return {"kind": "command", "reply": ack}
         if command == "sleep":
             self._transcript.append("user", text, via=via)
             self._transcript.append("model", SLEEP_ACK, via="system")
             self._state.sleep()
+            if self._voice is not None:
+                self._voice.sync_wake()  # resume local wake listening if opted in
             return {"kind": "command", "reply": SLEEP_ACK}
         if command == "wake":
             # We're already awake here (sleeping was blocked by the caller).
@@ -205,6 +230,7 @@ class GojoAPI:
             "provider": self._settings.provider,
             "model": self._settings.gemini_model,
             "busy": self._voice.busy if self._voice is not None else False,
+            "wake_listening": self._voice.listener_running if self._voice is not None else False,
             "note": note,
         }
 
@@ -228,6 +254,8 @@ class GojoAPI:
             "voice_enabled": bool(self._prefs.get("voice_enabled") and s.voice_enabled),
             "tts_autoplay": bool(self._prefs.get("tts_autoplay")),
             "tts_provider": self._prefs.get("tts_provider"),
+            "always_listening": bool(self._prefs.get("always_listening")),
+            "wake_listening": self._voice.listener_running if self._voice else False,
             "fish_configured": bool(
                 fish_key and not fish_key.strip().lower().startswith("paste-")
             ),
@@ -247,6 +275,8 @@ class GojoAPI:
                 self._voice.tts.set_order(value)
             except ValueError:
                 return {"ok": False, "error": f"Unknown TTS provider: {value!r}"}
+        if key == "always_listening" and self._voice is not None:
+            self._voice.sync_wake()
         return {"ok": True, "prefs": prefs}
 
     # ------------------------------------------------------------------
