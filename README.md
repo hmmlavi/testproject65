@@ -7,71 +7,91 @@ dependency.
 
 ## Where we are now
 
-**Phase 1 (in progress): AI brain + text chat**
-- [x] Modular AI layer — brains are swappable via config, nothing hard-coded to one provider
-- [x] GOJO personality (playful, Hinglish, zero corporate tone, never fakes actions)
-- [x] Terminal chat — a developer front-end to prove the brain is real,
-      before we build the desktop window
+**Phase 1 — DONE:** AI brain (Gemini free tier) + terminal chat, verified.
 
-**Next steps (in order):**
-1. Desktop app window (glassy UI, chat) — next
-2. Voice in/out (faster-whisper STT + Piper TTS, both local & free)
-3. Wake word ("Hey Gojo" / "Wake up Gojo") + sleep state
-4. Personality polish
-5. PC tools (files, apps, VS Code, screenshots) behind a security layer
-6. Memory + conversation history (SQLite)
-7. Internet (search, web, browser)
-8. Agent mode (multi-step tasks)
-9. Reminders/scheduling
-10. Avatar + UI polish
-11. Android companion
-12. Security hardening + packaging
+**Phase 2 — this build:** the real desktop application.
+- [x] Desktop window (pywebview, dark glassy minimal UI, no web chrome)
+- [x] UI wired to the existing Gemini brain (same brain, same personality — untouched)
+- [x] Text input + responses, conversation transcript (persisted, real transcripts)
+- [x] Power (wake/sleep) control; app boots SLEEPING per spec; "sleep"/"wake" commands work in chat
+- [x] Status indicator (sleeping / active / thinking) + subtle state animations
+- [x] Compact settings panel (brain, state, data, version, clear-data with confirm)
+- [x] Architecture hooks for voice, memory, tools, agent (see docs/architecture.md)
 
-## Setup (one time, Windows)
+**Not in Phase 2 (honest list — nothing here fakes them):**
+- Voice (mic/TTS/wake word) → Phase 3
+- Memory recall, PC tools, web, reminders → later phases
+- Your avatar asset → provided by you, integrated in Phase 10 (a neutral
+  "G" monogram placeholder is shown until then — no fabricated avatar)
+- Tray icon / autostart → prepared architecturally, built in Phase 12
+
+## Setup (one time)
 
 ```bat
-cd C:\path\where\you\cloned\GOJO
+cd C:\GOJO                (or wherever you cloned it)
 py -3.14 -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env
-:: now open .env in any editor and paste your free Gemini key
+copy .env.example .env    (then paste your free Gemini key into .env)
 ```
 
 Free key: https://aistudio.google.com → **Get API key** → **Create API key**
 
-## Run the terminal chat
+## Run
 
 ```bat
-python -m gojo.cli_chat
+python -m gojo.app
 ```
 
-Then just talk. Try: `gojo, tu kaun hai?` — type `/help` for commands.
+- GOJO starts **sleeping** (dimmed avatar). Press the **power** button (top-right) to wake it.
+- Type a message → GOJO thinks (dots + ring pulse) → replies.
+- Type `gojo, sleep` → GOJO goes back down.
+- Top-right controls (left→right): **power** · **new chat** · **transcript** · **settings** · **quit**.
 
-### No-key wiring check (optional, NOT a real AI)
+The old terminal chat still works too:  `python -m gojo.cli_chat`
+
+## Troubleshooting
+
+- **Window doesn't open, error mentions WebView2:** install the free
+  "Microsoft Edge WebView2 Runtime" from Microsoft, then run again.
+- **`py` not recognized:** use `python -m venv .venv` instead.
+- **Brain error when typing:** check `.env` → `GEMINI_API_KEY` is your real
+  key (not the placeholder) and `GOJO_PROVIDER=gemini`.
+
+## Tests
 
 ```bat
-set GOJO_PROVIDER=mock
-python -m gojo.cli_chat
+python -m tests.test_router
+python -m tests.test_state
+python -m tests.test_commands
+python -m tests.test_transcript
+python -m tests.test_api
 ```
-
-Echoes your text with a MOCK label — only proves the install works.
-Remove it with `set GOJO_PROVIDER=gemini` (or close/reopen the terminal).
 
 ## Project layout
 
 ```
 gojo/
-  config.py      .env loading, all settings in one place
-  cli_chat.py    terminal chat (Phase 1 dev front-end)
+  app.py         desktop entry point (python -m gojo.app)
+  cli_chat.py    terminal chat (Phase 1, still works)
+  config.py      .env loading — all settings, secrets live here only
+  transcript.py  real conversation transcripts (JSONL sessions)
+  core/
+    state.py     state machine: sleeping / active / thinking (+voice states later)
+    commands.py  direct-command detection (sleep/wake) — seed of the command layer
   ai/
-    base.py      AIProvider interface (what makes brains swappable)
-    router.py    picks the brain from config (routing rules live here)
-    gemini.py    Google Gemini provider (free tier) — default brain
-    mock.py      offline wiring test only — clearly labeled, not real AI
-    prompts.py   GOJO's personality (system prompt)
-tests/           runnable checks:  python -m tests.test_router
-data/            local data (memory DB etc.) — created later, git-ignored
+    base.py      AIProvider interface (brains are swappable)
+    router.py    picks the brain (routing rules grow here)
+    gemini.py    Gemini provider (free tier) — the brain
+    mock.py      offline wiring test only — clearly labeled, NOT a real AI
+    prompts.py   GOJO's personality
+  ui/
+    api.py       JS<->Python bridge — every UI capability goes through here
+    web/         index.html / style.css / app.js (the front-end)
+tests/           runnable checks per module
+docs/
+  architecture.md  the map: decisions, extension points, testing rules
+data/            local data (transcripts) — git-ignored
 ```
 
 ## Rules this project follows

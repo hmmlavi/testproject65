@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>GOJO</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body data-state="sleeping">
+
+  <header class="topbar">
+    <div class="brand">
+      <span class="wordmark">GOJO</span>
+      <span class="pill" id="statusPill">
+        <span class="dot" id="statusDot"></span>
+        <span id="statusText">sleeping</span>
+      </span>
+    </div>
+
+    <nav class="rail">
+      <button class="ctl" id="btnPower" title="Power — wake / sleep" aria-label="Power">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M12 3v8"/><path d="M17.66 6.34a8 8 0 1 1-11.32 0"/>
+        </svg>
+      </button>
+      <button class="ctl" id="btnNew" title="New chat" aria-label="New chat">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M12 5v14M5 12h14"/>
+        </svg>
+      </button>
+      <button class="ctl" id="btnTranscript" title="Transcript" aria-label="Toggle transcript">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M4 6h16M4 12h11M4 18h7"/>
+        </svg>
+      </button>
+      <button class="ctl" id="btnSettings" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M4 7h16M4 12h16M4 17h16"/>
+          <circle cx="15" cy="7" r="2.2" fill="var(--bg)"/>
+          <circle cx="9" cy="12" r="2.2" fill="var(--bg)"/>
+          <circle cx="14" cy="17" r="2.2" fill="var(--bg)"/>
+        </svg>
+      </button>
+      <button class="ctl" id="btnQuit" title="Quit GOJO" aria-label="Quit">
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round">
+          <path d="M6 6l12 12M18 6L6 18"/>
+        </svg>
+      </button>
+    </nav>
+  </header>
+
+  <main class="stage">
+    <div class="avatar-wrap" id="avatarWrap" title="Avatar placeholder — final asset arrives in Phase 10">
+      <div class="avatar-ring"></div>
+      <div class="avatar-orb">
+        <span class="avatar-mark">G</span>
+      </div>
+    </div>
+
+    <div class="hero">
+      <span class="idle" id="heroIdle">· · · sleeping · · ·</span>
+      <span class="thinking" id="heroThinking" hidden><i></i><i></i><i></i></span>
+      <p class="reply" id="heroText" hidden></p>
+    </div>
+
+    <form class="composer" id="composer">
+      <input id="input" type="text" placeholder="Message GOJO…" autocomplete="off" spellcheck="false" disabled>
+      <button type="submit" class="send" id="btnSend" title="Send" aria-label="Send" disabled>
+        <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5 12h14M13 6l6 6-6 6"/>
+        </svg>
+      </button>
+    </form>
+  </main>
+
+  <aside class="transcript" id="transcriptPanel" aria-label="Conversation transcript">
+    <div class="tr-head">
+      <span class="tr-title">Transcript</span>
+      <span class="tr-count" id="trCount">0</span>
+    </div>
+    <div class="tr-entries" id="trEntries">
+      <div class="tr-empty" id="trEmpty">No conversation yet.</div>
+    </div>
+  </aside>
+
+  <div class="modal" id="settingsModal" aria-hidden="true">
+    <div class="modal-card" role="dialog" aria-label="Settings">
+      <div class="modal-head">
+        <span class="modal-title">Settings</span>
+        <button class="modal-close" id="btnModalClose" title="Close" aria-label="Close">×</button>
+      </div>
+      <div class="set-row"><span class="set-label">Brain</span><span class="set-value" id="setBrain">—</span></div>
+      <div class="set-row"><span class="set-label">State</span><span class="set-value" id="setState">—</span></div>
+      <div class="set-row"><span class="set-label">Data folder</span><span class="set-value small" id="setData" title="">—</span></div>
+      <div class="set-row"><span class="set-label">Version</span><span class="set-value" id="setVersion">—</span></div>
+      <div class="modal-actions">
+        <button class="btn danger" id="btnClearData" title="Deletes all saved conversations">Clear all data</button>
+        <button class="btn" id="btnModalDone">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status"></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
