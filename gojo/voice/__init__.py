@@ -6,8 +6,10 @@ pipeline.py  — orchestrates: record -> STT -> shared brain path -> TTS -> play
 playback.py  — audio playback (Windows: winsound) + temp file cleanup
 tts/         — TTS providers: base (interface), fish_audio, windows_tts,
                normalize (speech text layer), router (fallback chain)
-wakeword.py  — WakeWordEngine interface (Phase 4; NOT active in Phase 3)
+wakeword.py  — LOCAL wake word (Phase 4): tiny-Whisper sliding windows +
+               fuzzy "Hey/Hi/Hello Gojo" matcher + opt-in mic listener.
+               OFF by default; 100% local (nothing is uploaded).
 
 Privacy default: the microphone is only ever open while the user is
-press-to-talking. No continuous listening in Phase 3.
+press-to-talking, or while they have explicitly enabled always-listening.
 """
