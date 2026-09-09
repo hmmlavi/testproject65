@@ -44,7 +44,10 @@ def _import_sd():
 
 def query_input_devices() -> list[dict]:
     """Input devices PortAudio currently sees. Virtual cable mics (AudioRelay,
-    VoiceMeeter, ... ) appear here as ordinary input devices."""
+    VoiceMeeter, ... ) appear here as ordinary input devices. Each entry
+    carries ``default_samplerate`` — the rate Windows is known to accept
+    for that device (virtual mics like AudioRelay often accept ONLY this
+    one)."""
     sd = _import_sd()
     devs: list[dict] = []
     for i, d in enumerate(sd.query_devices()):
@@ -52,9 +55,34 @@ def query_input_devices() -> list[dict]:
             channels = int(d.get("max_input_channels") or 0)
         except (TypeError, ValueError):
             channels = 0
-        if channels > 0:
-            devs.append({"index": i, "name": d["name"], "channels": channels})
+        if channels <= 0:
+            continue
+        try:
+            rate = float(d.get("default_samplerate") or 0)
+        except (TypeError, ValueError):
+            rate = 0.0
+        devs.append(
+            {"index": i, "name": d["name"], "channels": channels,
+             "default_samplerate": rate}
+        )
     return devs
+
+
+def choose_stream_rate(dev: dict, requested: int = 16000) -> int:
+    """The sample rate to open the stream at.
+
+    Uses the device's native ``default_samplerate`` when known — WASAPI
+    often rejects other rates (AudioRelay: 48 kHz only; opening at 16 kHz
+    fails with ``Invalid sample rate [PaErrorCode -9997]``). Captured
+    audio is converted to 16 kHz afterwards (voice/resample.py). Devices
+    without rate info keep the requested rate (legacy behaviour).
+    Pure function — unit-testable without hardware.
+    """
+    try:
+        rate = float(dev.get("default_samplerate") or 0)
+    except (TypeError, ValueError):
+        rate = 0.0
+    return int(rate) if rate > 0 else int(requested)
 
 
 def resolve_input_device(
@@ -116,12 +144,18 @@ def resolve_input_device(
 
 def open_input_stream(spec: str, sr: int = 16000):
     """Open a real sounddevice InputStream on the resolved device.
-    Returns ``(stream, device)`` — the caller owns (closes) the stream."""
+    Returns ``(stream, device, stream_sr)`` — the stream is opened at the
+    device's native rate (see choose_stream_rate); the caller owns the
+    stream and must convert audio from ``stream_sr`` to its own target."""
     dev = resolve_input_device(spec)
     sd = _import_sd()
-    logger.info("opening input device: %s (index %s, spec %r)", dev["name"], dev["index"], spec)
-    stream = sd.InputStream(samplerate=sr, channels=1, dtype="float32", device=dev["index"])
-    return stream, dev
+    stream_sr = choose_stream_rate(dev, sr)
+    logger.info("opening input device: %s (index %s, spec %r) at %d Hz",
+                dev["name"], dev["index"], spec, stream_sr)
+    stream = sd.InputStream(
+        samplerate=stream_sr, channels=1, dtype="float32", device=dev["index"]
+    )
+    return stream, dev, stream_sr
 
 
 def read_peak(spec: str, seconds: float = 1.2, sr: int = 16000) -> dict:
@@ -130,7 +164,7 @@ def read_peak(spec: str, seconds: float = 1.2, sr: int = 16000) -> dict:
     the device name, sample count, and peak amplitude."""
     import numpy as np
 
-    stream, dev = open_input_stream(spec, sr)
+    stream, dev, _stream_sr = open_input_stream(spec, sr)
     frames = 0
     peak = 0.0
     n = max(1, int(sr * 0.1))

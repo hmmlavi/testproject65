@@ -164,7 +164,11 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
   If your phone mic comes in through **AudioRelay**, that virtual device
   is NOT the default input: list devices with
   `python -c "import sounddevice as sd; print(sd.query_devices())"` and
-  set `GOJO_MIC_DEVICE` to its name or index, then restart; (3) mic
+  set `GOJO_MIC_DEVICE` to its name or index, then restart. (Sample rate
+  is automatic: GOJO opens the stream at the device's native rate — e.g.
+  48 kHz on AudioRelay — and converts to the 16 kHz the speech models
+  need; if you ever see `Invalid sample rate [PaErrorCode -9997]` you're
+  on a pre-fix build — `git pull`.) (3) mic
   permission — Windows Settings → Privacy → Microphone → allow desktop
   apps; (4) say it clearly, ~0.5–1 m from the mic, in a reasonably quiet
   room; (5) first time adds ~2–3 s detection latency (2 s window + local

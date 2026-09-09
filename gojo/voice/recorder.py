@@ -17,6 +17,8 @@ import threading
 import time
 from dataclasses import dataclass
 
+from .resample import resample_to_target
+
 logger = logging.getLogger("gojo.voice.recorder")
 
 SAMPLE_RATE = 16000  # 16kHz mono — the standard rate for whisper models
@@ -115,11 +117,14 @@ class VoiceRecorder:
         try:
             if self._stream_factory is not None:
                 stream = self._stream_factory()
+                stream_sr = int(getattr(stream, "samplerate", 0) or self._sr)
             else:
                 from . import devices
 
-                stream, dev = devices.open_input_stream(self._device_spec, self._sr)
-                self._last_device = f"{dev['name']} (index {dev['index']})"
+                stream, dev, stream_sr = devices.open_input_stream(self._device_spec, self._sr)
+                # the stream's own reported rate wins (it is ground truth)
+                stream_sr = int(getattr(stream, "samplerate", 0) or stream_sr)
+                self._last_device = f"{dev['name']} (index {dev['index']}, {stream_sr} Hz)"
                 logger.info("recording from: %s", self._last_device)
         except Exception as exc:  # noqa: BLE001 — no mic, no PortAudio, permissions...
             self._fatal = f"No microphone available: {exc}"
@@ -128,11 +133,15 @@ class VoiceRecorder:
 
         try:
             with stream:
-                frame = self._sr // 4  # 250 ms frames
+                frame = max(1, stream_sr // 4)  # ~250 ms frames at the stream rate
                 silent_since: float | None = None
                 while True:
                     data, _overflow = stream.read(frame)
                     chunk = data.flatten()
+                    # STT (and the result contract) is 16 kHz; the stream may
+                    # run at the device's native rate (e.g. 48 kHz on AudioRelay)
+                    if stream_sr != self._sr:
+                        chunk = resample_to_target(chunk, stream_sr, self._sr)
                     self._chunks.append(chunk)
 
                     elapsed = time.time() - self._started_at

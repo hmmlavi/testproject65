@@ -49,6 +49,8 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .resample import resample_to_target
+
 logger = logging.getLogger("gojo.voice.wakeword")
 
 WAKE_PHRASES = (
@@ -321,8 +323,9 @@ class WakeListener:
             else:
                 from . import devices
 
-                stream, dev = devices.open_input_stream(self._device_spec, self._sr)
-                self._last_device = f"{dev['name']} (index {dev['index']})"
+                stream, dev, stream_sr = devices.open_input_stream(self._device_spec, self._sr)
+                stream_sr = int(getattr(stream, "samplerate", 0) or stream_sr)
+                self._last_device = f"{dev['name']} (index {dev['index']}, {stream_sr} Hz)"
         except Exception as exc:  # noqa: BLE001 — no mic / no PortAudio / blocked
             return {"ok": False, "error": f"No microphone available: {exc}"}
         self._frames_seen = 0
@@ -341,12 +344,18 @@ class WakeListener:
     def _run(self, stream) -> None:
         try:
             with stream:
+                # the stream may run at the device's native rate (e.g. 48 kHz
+                # on AudioRelay); the engine always expects 16 kHz frames
+                stream_sr = int(getattr(stream, "samplerate", 0) or self._sr)
                 while not self._stop_event.is_set():
                     data, _overflow = stream.read(self._frame)
                     self._frames_seen += 1
                     if self._stop_event.is_set():
                         break
-                    phrase = self._engine.add_frame(np.asarray(data).flatten())
+                    arr = np.asarray(data).flatten()
+                    if stream_sr != self._sr:
+                        arr = resample_to_target(arr, stream_sr, self._sr)
+                    phrase = self._engine.add_frame(arr)
                     if phrase:
                         try:
                             self._on_wake(phrase)

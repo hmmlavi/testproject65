@@ -26,7 +26,8 @@ from gojo.transcript import TranscriptStore
 from gojo.ui.api import GojoAPI
 from gojo.voice.pipeline import VoicePipeline
 from gojo.voice.playback import AudioPlayer
-from gojo.voice.recorder import RecordingResult
+from gojo.voice.recorder import RecordingResult, VoiceRecorder
+from gojo.voice.resample import resample_to_target
 from gojo.voice.stt import WhisperSTT
 from gojo.voice.tts.base import TTSProvider
 from gojo.voice.tts.router import TTSRouter
@@ -346,6 +347,138 @@ def test_resolve_input_device_pure() -> None:
     except MicDeviceError as exc:
         assert "no input devices" in str(exc)
     print("PASS test_resolve_input_device_pure")
+
+
+# ---------------------------------------------------------------------
+# 2c. sample-rate handling (AudioRelay virtual mic = 48 kHz only)
+# ---------------------------------------------------------------------
+
+
+def _dominant_freq(audio: np.ndarray, sr: int = 16000) -> float:
+    spec = np.abs(np.fft.rfft(audio))
+    freqs = np.fft.rfftfreq(audio.size, 1 / sr)
+    return float(freqs[int(np.argmax(spec))])
+
+
+def test_resample_48k_to_16k() -> None:
+    """The AudioRelay case: 48000 -> 16000 is an exact 3:1 decimation and
+    a 400 Hz tone must stay a 400 Hz tone."""
+    sr = 48000
+    tone = (np.sin(2 * np.pi * 400 * np.arange(sr // 4) / sr) * 0.1).astype(np.float32)
+    out = resample_to_target(tone, sr, 16000)
+    assert out.dtype == np.float32
+    assert out.size == 4000  # 250 ms @ 16 kHz
+    assert abs(_dominant_freq(out) - 400) < 5
+    # same-rate input passes through untouched
+    assert resample_to_target(tone, 16000, 16000) is tone
+    assert resample_to_target(np.zeros(0, dtype=np.float32), 48000, 16000).size == 0
+    print("PASS test_resample_48k_to_16k")
+
+
+def test_resample_44100_to_16k() -> None:
+    """Non-integer ratio (2.75625) goes through the interpolation path."""
+    sr = 44100
+    tone = (np.sin(2 * np.pi * 400 * np.arange(sr // 4) / sr) * 0.1).astype(np.float32)
+    out = resample_to_target(tone, sr, 16000)
+    assert out.size == 4000
+    assert abs(_dominant_freq(out) - 400) < 5
+    print("PASS test_resample_44100_to_16k")
+
+
+def test_choose_stream_rate() -> None:
+    from gojo.voice.devices import choose_stream_rate, resolve_input_device
+
+    # the user's real device: Virtual Mic (AudioRelay), index 15, 48 kHz
+    dev15 = {"index": 15, "name": "Virtual Mic (Virtual Mic for AudioRelay)",
+             "channels": 2, "default_samplerate": 48000.0}
+    assert choose_stream_rate(dev15) == 48000
+    # device without rate info -> keep the requested rate (legacy behaviour)
+    assert choose_stream_rate({"index": 0, "name": "Mic", "channels": 2}) == 16000
+    assert choose_stream_rate({"default_samplerate": 0.0}, 22050) == 22050
+    # resolver passes the rate through for explicit index/name selection
+    devs = [
+        {"index": 0, "name": "Microphone (Realtek(R) Audio)", "channels": 2,
+         "default_samplerate": 44100.0},
+        dev15,
+    ]
+    assert resolve_input_device("15", devs)["default_samplerate"] == 48000.0
+    assert resolve_input_device("audiorelay", devs)["default_samplerate"] == 48000.0
+    assert choose_stream_rate(resolve_input_device("", devs, default_index=0)) == 44100
+    print("PASS test_choose_stream_rate")
+
+
+class Fake48kStream:
+    """Mimics the AudioRelay virtual mic: declares samplerate=48000 (like a
+    real sounddevice InputStream) and serves endless 400 Hz tone frames."""
+
+    samplerate = 48000
+
+    def __init__(self) -> None:
+        self._t = 0
+
+    def __enter__(self) -> "Fake48kStream":
+        return self
+
+    def __exit__(self, *exc) -> bool:
+        return False
+
+    def read(self, n: int):
+        t = np.arange(self._t, self._t + n) / 48000
+        self._t += n
+        time.sleep(0.005)  # be a polite stream
+        return (np.sin(2 * np.pi * 400 * t) * 0.05).astype(np.float32), False
+
+
+def test_recorder_resamples_48k_stream_to_16k() -> None:
+    """THE regression: a device that only accepts 48 kHz (AudioRelay) must
+    produce 16 kHz results for the unchanged STT pipeline. A 400 Hz tone
+    stays 400 Hz — if resampling were missing, the 48k samples re-read as
+    16k would show up at 1200 Hz."""
+    rec = VoiceRecorder(stream_factory=Fake48kStream)
+    rec.start()
+    time.sleep(0.12)
+    rec.request_stop()
+    res = rec.wait_result(timeout=10)
+    assert res.ok and res.audio is not None, f"48k stream must record ok: {res.error}"
+    assert res.audio.size >= 4000
+    assert abs(_dominant_freq(res.audio) - 400) < 10, (
+        f"expected a 400 Hz tone at 16 kHz, got {_dominant_freq(res.audio):.0f} Hz "
+        "(missing 48k->16k resample?)"
+    )
+    print("PASS test_recorder_resamples_48k_stream_to_16k")
+
+
+class CountingEngine:
+    name = "counting"
+
+    def __init__(self) -> None:
+        self.total = 0
+        self.max_frame = 0
+
+    def add_frame(self, frame) -> str | None:
+        self.total += frame.size
+        self.max_frame = max(self.max_frame, frame.size)
+        return None
+
+    def reset(self) -> None:
+        pass
+
+
+def test_wake_listener_resamples_48k_stream() -> None:
+    """The wake engine must only ever see 16-kHz-scaled frames, even when
+    the stream runs at 48 kHz (each 4000-sample 48k read -> ~1333 @16k)."""
+    eng = CountingEngine()
+    listener = WakeListener(eng, on_wake=lambda p: None,
+                            stream_factory=lambda: Fake48kStream())
+    listener.start()
+    time.sleep(0.12)
+    listener.stop()
+    assert eng.total > 0, "engine must receive frames"
+    assert eng.max_frame < 4000, (
+        f"engine saw a {eng.max_frame}-sample frame — 48k audio was not "
+        "converted to 16k before the engine"
+    )
+    print("PASS test_wake_listener_resamples_48k_stream")
 
 
 # ---------------------------------------------------------------------
@@ -749,6 +882,11 @@ def main() -> int:
         test_engine_tolerates_transcribe_errors,
         test_engine_model_size_is_capped,
         test_resolve_input_device_pure,
+        test_resample_48k_to_16k,
+        test_resample_44100_to_16k,
+        test_choose_stream_rate,
+        test_recorder_resamples_48k_stream_to_16k,
+        test_wake_listener_resamples_48k_stream,
         test_listener_no_mic_is_a_clean_error,
         test_listener_reports_frames_arriving,
         test_listener_fires_callback_and_stops,

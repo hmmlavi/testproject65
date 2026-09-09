@@ -149,6 +149,18 @@ state is SLEEPING. Every transition calls sync: power wake/sleep, spoken
 detection never runs while GOJO is awake (nothing to wake, and it keeps
 "Hey Gojo" said mid-conversation from triggering a re-listen).
 
+### Stream rate follows the device; downstream is always 16 kHz
+WASAPI frequently rejects non-native stream rates — the AudioRelay
+virtual mic accepts ONLY its native 48 kHz (opening at 16 kHz fails with
+`Invalid sample rate [PaErrorCode -9997]`). So `open_input_stream`
+opens at `choose_stream_rate(dev)` = the device's `default_samplerate`
+(pure function, unit-tested; no rate info → legacy 16 kHz request), and
+the recorder/wake listener read the stream's ACTUAL `.samplerate` and
+convert every chunk/frame to 16 kHz (`voice/resample.py`: integer ratios
+decimate — 48k→16k is exactly 3 — other ratios use linear interpolation;
+numpy-only, no new dependency). `RecordingResult.audio` stays 16 kHz, so
+STT, endpoint detection and the wake engine are untouched.
+
 ### Input device is explicit, never guessed
 Both the recorder and the wake listener open the device from
 `GOJO_MIC_DEVICE` (`.env`): empty = system default input, else an index
