@@ -40,6 +40,7 @@ const els = {
   setData: $("setData"),
   setVersion: $("setVersion"),
   setVoiceOn: $("setVoiceOn"),
+  setWakeWord: $("setWakeWord"),
   setAutoplay: $("setAutoplay"),
   setProvider: $("setProvider"),
   setFishVoice: $("setFishVoice"),
@@ -151,7 +152,9 @@ async function applyStatus(status) {
   if (!status) return;
   const state = status.state;
   els.body.dataset.state = state;
-  els.statusText.textContent = PILL_TEXT[state] || state;
+  // "sleeping + local wake listener on" shows as one combined status
+  els.statusText.textContent =
+    state === "sleeping" && status.wake_listening ? "wake listening" : PILL_TEXT[state] || state;
 
   const sleeping = state === "sleeping";
   const listening = state === "listening";
@@ -363,6 +366,7 @@ async function loadVoiceSettings() {
   if (!v.ok) return;
   voiceEnabled = !!v.voice_enabled;
   els.setVoiceOn.checked = voiceEnabled;
+  els.setWakeWord.checked = !!v.always_listening;
   els.setAutoplay.checked = !!v.tts_autoplay;
   els.setProvider.value = v.tts_provider || "auto";
   els.setFishVoice.textContent = v.fish_voice || "—";
@@ -449,6 +453,9 @@ els.btnModalDone.addEventListener("click", closeSettings);
 els.btnClearData.addEventListener("click", onClearData);
 els.setVoiceOn.addEventListener("change", (e) => {
   saveVoicePref("voice_enabled", e.target.checked);
+});
+els.setWakeWord.addEventListener("change", (e) => {
+  saveVoicePref("always_listening", e.target.checked);
 });
 els.setAutoplay.addEventListener("change", (e) => {
   saveVoicePref("tts_autoplay", e.target.checked);

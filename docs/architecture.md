@@ -1,6 +1,6 @@
 # GOJO — Architecture Map
 
-Updated: Phase 3 (voice). Read this before adding anything new.
+Updated: Phase 4 (wake word). Read this before adding anything new.
 
 ## The one rule
 
@@ -26,7 +26,9 @@ knows a UI exists; the state machine doesn't care who asked.
   Voice (Phase 3) ─▶│  voice/pipeline:                          │
   (Talk button)     │    recorder → stt → ★ shared brain path ★ │
    (ui/api.py)      │    → tts/router → playback                │
-                    │  wakeword (interface only, Phase 4)        │
+  Wake (Phase 4) ──▶│  voice/wakeword (LOCAL, opt-in):          │
+  (opt-in listener) │    tiny-Whisper windows → fuzzy "Hey Gojo"│
+                    │    → pipeline._on_wake → SAME brain path  │
                     └────────────────────────────────────────────┘
 ```
 
@@ -106,6 +108,66 @@ new states cost zero JS.
   (unknown keys and bad provider values are rejected), corrupted file →
   safe defaults. Engine choice applies live via `TTSRouter.set_order()`.
 
+## Phase 4 decisions (and why)
+
+### Why not openWakeWord (due diligence, 2026-09, checked before coding)
+- Pre-trained models: alexa / hey mycroft / hey jarvis / hey rhasspy /
+  weather / timers — **no "Gojo" phrase exists** in any release.
+- English-only: training data is English synthetic speech; the user speaks
+  Hinglish, so even a custom-trained model would underperform on their
+  actual wake phrases.
+- A custom "hey gojo" model needs the full training pipeline (espeak-ng on
+  Windows + synthetic-data generation + hours of training), and its quality
+  could not be verified without real microphone testing. We don't ship
+  unverified detectors.
+- Latest release is 0.6.0 (2024) — the project is moving slowly.
+- faster-whisper's **tiny** model (~75 MB, int8 CPU) is already part of
+  GOJO's verified stack (same wheels, same download path as the "small" STT
+  model), understands Hindi + English, needs zero training for custom
+  phrases, and `transcribe(..., hotwords="gojo")` biases decoding toward the
+  name. Decision: whisper-based wake detection.
+
+### Detector: sliding windows, RMS-gated, capped model
+`voice/wakeword.py` — `WhisperWakeWord`: 16 kHz mono frames fill a sliding
+2.0 s window (1.0 s step). Each full window is (1) RMS-gated — silent
+windows skip inference entirely (near-zero idle CPU), then (2) transcribed
+(tiny/int8, `beam_size=1`, `vad_filter=False`, `condition_on_previous_text=
+False`, `hotwords="gojo"`, auto language), then (3) matched by
+`match_wake_phrase()` — pure string logic (unit-tested): canonical phrases,
+ASR variants (punctuation/case, "goyo"/"goho"/"gogo" edit distance ≤ 1,
+"go jo" token split, fused "heygojo", bare "gojo"). A match resets the
+buffer + a 3 s cooldown so one utterance can't fire twice. Model size is
+hard-capped at tiny/base (the CPU budget is a hard constraint). `add_frame`
+never raises — detection is best-effort and must not kill the listener
+thread.
+
+### Listener lifecycle = a function of (opt-in AND sleeping)
+`WakeListener` owns one mic + one thread; `VoicePipeline.sync_wake()` is
+the single rule: listener runs only when `always_listening` is ON **and**
+state is SLEEPING. Every transition calls sync: power wake/sleep, spoken
+"sleep", settings toggle, command toggle, end of a wake turn, boot. Wake
+detection never runs while GOJO is awake (nothing to wake, and it keeps
+"Hey Gojo" said mid-conversation from triggering a re-listen).
+
+### Wake turn contract: one turn per wake
+On detection: SLEEPING→ACTIVE → local beep (`winsound.Beep`, 150 ms,
+injectable) + "Gojo? Bolo." note (the ack is local — no network) → mic
+opens (after the beep, so the beep is never recorded) → LISTENING → the
+captured command runs through the SAME shared brain path (so "Gojo, sleep"
+and "Gojo, always listening off" work by voice too) → reply spoken (Fish if
+configured) → SLEEPING → listener re-arms (if still opted in). The turn
+runs on its own worker thread — the listener thread exits immediately after
+firing, because re-arming happens after the turn. No autonomous
+conversation: one command per wake, by design (that's Phase 8 territory).
+
+### Privacy (hard rule)
+- `always_listening` defaults OFF and lives in `data/gojo_prefs.json`
+  (validated by `prefs.py`). Nothing records unless the user opts in.
+- Wake detection is fully local: no audio, frame, or transcript leaves the
+  PC. Gemini/Fish are only contacted AFTER a wake, for the command/reply.
+- The mic opens in exactly two situations: an explicit press-to-talk, or an
+  opt-in wake listener. Nothing else.
+
 ## Phase 2 decisions (still standing)
 
 ### UI transport: pywebview bridge, NOT an HTTP server
@@ -138,7 +200,7 @@ canned acks — instant, free, honest. Spoken commands hit the same function.
 | Phase | What | Where it plugs in |
 |-------|------|-------------------|
 | 3 — Voice | ✅ DONE: press-to-talk mic → faster-whisper → shared brain path → Fish TTS (S2.1 Pro free) → Windows-voice fallback → speakers; 6 avatar states; transcript origin tags; voice settings | `gojo/voice/` + `ui/api.py` (`start_talk`, `stop_talk`, `get_voice_settings`, `set_voice_pref`) |
-| 4 — Wake word | "Hey/Hi/Hello Gojo" | implement `WakeWordEngine` (`gojo/voice/wakeword.py`) with openWakeWord or Porcupine; on detection call `pipeline.start_talk()` — same path as the button; add an explicit "always-listening is optional & off by default" toggle |
+| 4 — Wake word | ✅ DONE: "Hey/Hi/Hello Gojo" — local tiny-Whisper detector (openWakeWord evaluated & rejected: no Gojo models, English-only, untrainable-without-verification), opt-in always-listening (default OFF), wake → ack → same brain path → sleep + re-arm | `gojo/voice/wakeword.py` + `VoicePipeline.sync_wake()` / `_on_wake()`; prefs key `always_listening`; commands "Gojo, always listening on/off" |
 | 5 — PC tools | files, apps, screenshots | new `gojo/tools/` with a tool interface; Gemini function-calling; every call passes through `gojo/security/` (Phase 12 hardens the gate) |
 | 6 — Memory | remember/forget/contextual recall | `TranscriptStore` backend swaps to SQLite + local embeddings; recalled items injected into the prompt via the router — UI untouched |
 | 7 — Web | search, browsing | `gojo/browser/` (DuckDuckGo + Playwright), exposed as tools to the brain |

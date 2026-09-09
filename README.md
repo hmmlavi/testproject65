@@ -17,7 +17,7 @@ dependency.
 - [x] Status indicator (sleeping / active / thinking) + subtle state animations
 - [x] Compact settings panel (brain, state, data, version, clear-data with confirm)
 
-**Phase 3 — this build:** the voice system.
+**Phase 3 — DONE:** the voice system. (User-verified on the real Windows PC.)
 - [x] Press-to-talk: 🎙 Talk button in the chat bar. Click → listen (mic
   pulses red), speak, and GOJO auto-stops when you pause — or click again to
   stop early. **No continuous listening, ever** — the mic is only open
@@ -44,15 +44,40 @@ dependency.
 - [x] Wake-word interface created (WakeWordEngine) for Phase 4 — NOT wired to
   the mic this phase, per spec.
 
-**Honest limits of Phase 3:**
-- Mic, STT and speech need `pip install -r requirements.txt` (new voice
+**Phase 4 — this build:** real wake-word detection ("Hey Gojo").
+- [x] Say **"Hey Gojo"**, **"Hi Gojo"** or **"Hello Gojo"** and GOJO wakes
+  from sleep: beep + "Gojo? Bolo." → listens → your command goes through
+  the **same shared voice → brain → reply → TTS pipeline** → GOJO sleeps
+  again and keeps listening. "Gojo, sleep" also works by voice.
+- [x] 100% local detection: a small (tiny, ~75 MB) local Whisper model
+  scans short audio windows on your CPU — **no audio ever leaves your PC**
+  during wake listening. Gemini/Fish are only touched AFTER a wake.
+- [x] **Always-listening is OFF by default** and user-controlled:
+  Settings → Voice → "Wake word (always listening)" toggle, or say/type
+  "Gojo, always listening on / off". When off, the microphone is never
+  opened on its own (press-to-talk still works after power-on).
+- [x] Status pill shows **sleeping / wake listening / listening /
+  thinking / speaking** — no new chrome, existing style.
+- [x] Wake model is capped at "tiny" (CPU budget) and silent windows skip
+  inference entirely — near-zero idle CPU.
+- [x] openWakeWord was evaluated and rejected (documented in
+  docs/architecture.md): its pre-trained models don't include any "Gojo"
+  phrase and it's English-only; a custom model would need a heavy training
+  pipeline we can't verify without your microphone.
+
+**Honest limits (Phase 3+4):**
+- Mic, STT and speech need `pip install -r requirements.txt` (voice
   packages) and a Fish key for the Fish voice (Windows-voice fallback works
   with zero keys).
+- First wake-listening session downloads the ~75 MB "tiny" model once,
+  then runs offline.
+- Wake-word detection quality (real speech, your room, your mic) can only
+  be judged on your PC — everything else is tested (see tests).
 - Fish Audio's free tier: no latency SLA, and per their policy requests may
   be retained for model improvement — your voice prompts leave your PC when
-  you use Fish (the local fallback sends nothing anywhere).
-- No wake word yet (Phase 4), no speed control (Fish supports it; added when
-  more settings are worth the UI space), no custom avatar yet (yours, Phase 10).
+  you use Fish (the local fallback and the entire wake-word stage send
+  nothing anywhere).
+- No speed control, no custom avatar yet (yours, Phase 10).
 - Memory recall, PC tools, web, reminders → later phases
 - Tray icon / autostart → prepared architecturally, built in Phase 12
 
@@ -87,6 +112,12 @@ python -m gojo.app
   thinks → replies on screen **and speaks** (Fish voice if configured,
   otherwise your Windows voice) → avatar ring pulses while speaking.
   Click 🎙 again at any point to stop early.
+- **Wake word (opt-in):** Settings → Voice → tick **"Wake word (always
+  listening)"** (or say "Gojo, always listening on" while awake). The pill
+  now reads **wake listening**. Even while sleeping, say **"Hey Gojo"** →
+  beep + "Gojo? Bolo." → speak your command → GOJO replies and speaks →
+  sleeps again. Say "Gojo, always listening off" (or untick) to stop; the
+  mic then only opens via power + 🎙 as before.
 - Top-right controls (left→right): **power** · **new chat** · **transcript** · **settings** · **quit**.
 - **Voice settings** (settings panel): on/off, reply-with-voice, engine
   choice (auto / Fish first / local only), Fish voice + key status, STT model.
@@ -117,6 +148,18 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
   (~460 MB) into its cache, then STT runs fully offline.
 - **GOJO answered but you heard nothing:** check Windows volume/mute, and
   Settings → Voice → "Reply with voice" is on.
+- **Saying "Hey Gojo" does nothing:** (1) Settings → Voice → "Wake word"
+  must be ticked and the pill must say **wake listening** (not just
+  sleeping); (2) mic permission — Windows Settings → Privacy →
+  Microphone → allow desktop apps; (3) say it clearly, ~0.5–1 m from the
+  mic, in a reasonably quiet room; (4) first time adds ~2–3 s detection
+  latency (2 s window + local inference) and downloads the ~75 MB model
+  once; (5) try "Hello Gojo" if "Hey Gojo" is being missed — all three
+  phrases are supported and ASR varies by speaker.
+- **GOJO wakes when it shouldn't:** the detector is local and fuzzy by
+  design (it tolerates mis-recognized "gojo"); the false-wake cost is one
+  "I didn't catch that" and it goes back to listening. If it's a nuisance
+  in a loud room, keep wake word off and use power + 🎙.
 
 ## Tests
 
@@ -129,6 +172,7 @@ python -m tests.test_api
 python -m tests.test_prefs
 python -m tests.test_tts          (TTS abstraction, Fish contract, fallback, cleanup)
 python -m tests.test_voice        (recorder, STT, full press-to-talk pipeline)
+python -m tests.test_wakeword     (wake matching, listener lifecycle, wake flow)
 python -m tests.test_app_wiring   (bridge wiring contract, pywebview 6.x)
 ```
 
@@ -154,7 +198,8 @@ gojo/
     pipeline.py  press-to-talk orchestrator (mic → STT → shared brain path → TTS → speaker)
     recorder.py  microphone capture + end-of-speech detection (16 kHz, endpointing)
     stt.py       faster-whisper wrapper (lazy import, injectable for tests)
-    wakeword.py  WakeWordEngine interface — Phase 4 placeholder, mic never touched
+    wakeword.py  LOCAL wake word (Phase 4): tiny-Whisper windows + fuzzy
+                 "Hey/Hi/Hello Gojo" matcher + mic listener (opt-in only)
     playback.py  speakers (winsound, no console window) + audio file cleanup
     tts/
       base.py    TTSProvider interface + TTSError/TTSResult (providers are swappable)
@@ -165,7 +210,7 @@ gojo/
   ui/
     api.py       JS<->Python bridge — every UI capability goes through here
     web/         index.html / style.css / app.js (the front-end)
-tests/           runnable checks per module (9 modules, 78 checks)
+tests/           runnable checks per module (10 modules, 100 checks)
 docs/
   architecture.md  the map: decisions, extension points, testing rules
 data/            local data (transcripts, prefs, voice audio) — git-ignored
