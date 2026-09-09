@@ -67,11 +67,20 @@ class WindowsTTS(TTSProvider):
 
             engine = pyttsx3.init()
             try:
-                engine.saveWav(str(path), text)
+                # Verified against the pyttsx3 source (2.71 -> 2.99): the
+                # method is save_to_file(text, filename) — text FIRST — and
+                # the SAPI5 driver writes a WAV via SAPI.SPFileStream.
+                # (There is no saveWav/saveToWav on the Engine.)
+                if not hasattr(engine, "save_to_file"):
+                    raise AttributeError(
+                        "installed pyttsx3 is too old for file synthesis — "
+                        "fix with: pip install -U pyttsx3"
+                    )
+                engine.save_to_file(text, str(path))
                 engine.runAndWait()
             finally:
                 try:
-                    engine.stop()
+                    engine.stop()  # no-op once the save has completed
                 except Exception:  # noqa: BLE001
                     pass
         except Exception as exc:  # noqa: BLE001

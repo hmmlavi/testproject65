@@ -8,4 +8,5 @@ pywebview>=6.0
 faster-whisper>=1.0      # speech-to-text (first use downloads the model, ~460 MB for "small")
 sounddevice>=0.4         # microphone capture
 numpy>=1.26              # audio buffers (endpointing math)
-pyttsx3>=2.40            # Windows local voice (automatic fallback when Fish is unavailable)
+pyttsx3>=2.71           # Windows local voice (automatic fallback when Fish is unavailable;
+                        # 2.71 is the oldest version verified to have save_to_file -> WAV)
