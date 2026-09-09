@@ -1,6 +1,10 @@
 /* GOJO — Phase 2 front-end logic.
    Talks to Python ONLY through window.pywebview.api (see gojo/ui/api.py).
-   No state is kept on the JS side that Python doesn't own. */
+   No state is kept on the JS side that Python doesn't own.
+
+   BRIDGE RULE: every Python call goes through callApi(), so a broken
+   bridge can never fail silently — it toasts an error and, if the bridge
+   never comes up at all, the page shows a full-screen fatal message. */
 "use strict";
 
 const $ = (id) => document.getElementById(id);
@@ -31,9 +35,12 @@ const els = {
   btnModalDone: $("btnModalDone"),
   btnClearData: $("btnClearData"),
   toast: $("toast"),
+  fatal: $("bridgeFatal"),
+  fatalMsg: $("bridgeFatalMsg"),
 };
 
 let api = null;
+let booted = false;
 let busy = false;
 let transcriptOpen = false;
 let lastResponse = false; // has GOJO replied in this session?
@@ -45,26 +52,62 @@ const IDLE_TEXT = {
 };
 
 /* ------------------------------------------------------------------ */
+/* bridge helper — errors are NEVER silent                             */
+/* ------------------------------------------------------------------ */
+
+function callApi(name, ...args) {
+  if (!api) return Promise.reject(new Error("bridge not ready"));
+  return api[name](...args).catch((err) => {
+    toast(`Bridge error (${name}): ${err}`, true);
+    throw err;
+  });
+}
+
+/* ------------------------------------------------------------------ */
 /* bootstrap: wait for the pywebview bridge, then init                 */
 /* ------------------------------------------------------------------ */
 
 function boot(tries = 60) {
+  if (booted) return;
   if (window.pywebview && window.pywebview.api) {
+    booted = true;
     api = window.pywebview.api;
     init();
     return;
   }
   if (tries <= 0) {
-    els.statusText.textContent = "bridge offline";
+    showFatal(
+      "The interface couldn't reach GOJO's engine (bridge offline). " +
+      "Close the app and run  python -m gojo.app  again from the terminal — " +
+      "if it still happens, check the terminal output for errors."
+    );
     return;
   }
   setTimeout(() => boot(tries - 1), 100);
 }
 
+/* Fast path: pywebview 6.x fires 'pywebviewready' once the API is
+   injected. The polling loop above stays as the fallback. */
+window.addEventListener("pywebviewready", () => boot(2));
+
+function showFatal(msg) {
+  els.fatalMsg.textContent = msg;
+  els.fatal.hidden = false;
+}
+
 async function init() {
-  await applyStatus(await api.get_status());
-  await loadTranscript();
-  await openSettingsData();
+  try {
+    const s = await callApi("get_status");
+    await applyStatus(s.status);
+  } catch (err) {
+    console.warn("init: get_status failed", err);
+  }
+  try {
+    await loadTranscript();
+    await openSettingsData();
+  } catch (err) {
+    console.warn("init: transcript/settings failed", err);
+  }
   setInterval(() => refreshStatus(), 900); // status polling (push comes in Phase 3 with voice)
   els.input.focus();
 }
@@ -73,12 +116,10 @@ async function init() {
 /* status                                                              */
 /* ------------------------------------------------------------------ */
 
-async function refreshStatus() {
-  try {
-    await applyStatus(await api.get_status());
-  } catch (err) {
-    console.warn("status poll failed", err);
-  }
+function refreshStatus() {
+  callApi("get_status")
+    .then((s) => applyStatus(s.status))
+    .catch(() => {}); // transport errors already toasted by callApi
 }
 
 async function applyStatus(status) {
@@ -113,7 +154,7 @@ function onSend() {
   showThinking(true);
   applyStatus({ state: "thinking" }); // optimistic; polling confirms
 
-  api.chat(text)
+  callApi("chat", text)
     .then((r) => {
       if (!r.ok) {
         toast(r.error, true);
@@ -123,7 +164,7 @@ function onSend() {
       appendEntry("gojo", r.reply);
       showReply(r.reply);
     })
-    .catch((err) => toast("Bridge error: " + err, true))
+    .catch(() => {}) // transport errors already toasted by callApi
     .finally(() => {
       busy = false;
       showThinking(false);
@@ -175,7 +216,7 @@ function setCount(n) {
 
 async function loadTranscript() {
   els.trEntries.querySelectorAll(".entry").forEach((e) => e.remove());
-  const r = await api.get_transcript();
+  const r = await callApi("get_transcript");
   if (r.ok && r.items.length) {
     els.trEmpty.style.display = "none";
     for (const item of r.items) {
@@ -188,8 +229,8 @@ async function loadTranscript() {
 }
 
 async function onNewChat() {
-  const r = await api.new_chat();
-  if (!r.ok) { toast(r.error, true); return; }
+  const r = await callApi("new_chat");
+  if (!r.ok) return;
   await loadTranscript();
   lastResponse = false;
   els.heroText.hidden = true;
@@ -203,23 +244,20 @@ async function onNewChat() {
 /* ------------------------------------------------------------------ */
 
 async function openSettingsData() {
-  try {
-    const s = await api.get_settings();
-    if (!s.ok) return;
-    els.setBrain.textContent = `${s.provider} · ${s.model}`;
-    els.setData.textContent = s.data_dir;
-    els.setData.title = s.data_dir;
-    els.setVersion.textContent = s.version;
-  } catch (err) {
-    console.warn("settings load failed", err);
-  }
+  const s = await callApi("get_settings");
+  if (!s.ok) return;
+  els.setBrain.textContent = `${s.provider} · ${s.model}`;
+  els.setData.textContent = s.data_dir;
+  els.setData.title = s.data_dir;
+  els.setVersion.textContent = s.version;
 }
 
 function openSettings() {
-  openSettingsData();
-  refreshStatus().then(() => {
+  openSettingsData().catch(() => {});
+  refreshStatus();
+  setTimeout(() => {
     els.setState.textContent = els.body.dataset.state;
-  });
+  }, 50);
   els.modal.classList.add("open");
   els.modal.setAttribute("aria-hidden", "false");
 }
@@ -231,8 +269,8 @@ function closeSettings() {
 
 async function onClearData() {
   if (!window.confirm("Delete ALL saved conversations? This cannot be undone.")) return;
-  const r = await api.clear_data();
-  if (!r.ok) { toast(r.error, true); return; }
+  const r = await callApi("clear_data");
+  if (!r.ok) return;
   lastResponse = false;
   await loadTranscript();
   els.heroText.hidden = true;
@@ -246,13 +284,16 @@ async function onClearData() {
 
 function onPower() {
   const sleeping = els.body.dataset.state === "sleeping";
-  const call = sleeping ? api.wake() : api.sleep();
-  call.then(refreshStatus).catch((err) => toast(String(err), true));
+  // explicit calls (not a ternary) so the wiring test can see both names
+  const call = sleeping ? callApi("wake") : callApi("sleep");
+  call
+    .then(() => refreshStatus())
+    .catch(() => {});
   if (!sleeping) toast("GOJO is going to sleep…");
 }
 
 function onQuit() {
-  api.close_app().catch(() => {});
+  callApi("close_app").catch(() => {});
 }
 
 function toggleTranscript() {

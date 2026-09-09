@@ -71,6 +71,15 @@ through the same function in Phase 3.
 
 - Every new module ships with a runnable check in `tests/`
   (`python -m tests.test_<name>`, zero extra dependencies).
+- The desktop bridge is guarded by a **wiring contract test**
+  (`tests/test_app_wiring.py`): it drives pywebview's real
+  JS→Python dispatcher (`webview.util.js_bridge_call`) against the real
+  window object, and cross-checks every function `app.js` calls (parsed
+  live from the file) against what pywebview actually exposes. This is
+  what caught the Phase 2 "dead buttons" bug: `create_window` was called
+  without `js_api`, so `window.pywebview.api` never existed in the page.
+  Front-end rule that keeps this airtight: **every** bridge call goes
+  through `callApi("name", ...)` so errors can never be silent.
 - Anything needing a network, mic, or window is tested with a labeled
   stand-in (MockProvider) — and the stand-in is always clearly marked
   "not real AI" in its output.

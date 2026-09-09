@@ -418,6 +418,42 @@ body.tr-open .transcript { transform: translateX(0); }
 .btn.danger { color: var(--danger); border-color: rgba(217, 138, 138, 0.28); }
 .btn.danger:hover { background: rgba(217, 138, 138, 0.1); border-color: rgba(217, 138, 138, 0.5); }
 
+/* ---------------- fatal (bridge offline) ---------------- */
+
+.fatal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  background: var(--bg);
+  padding: 24px;
+}
+.fatal[hidden] { display: none; }
+
+.fatal-card {
+  width: 420px;
+  max-width: 100%;
+  background: var(--glass-strong);
+  border: 1px solid rgba(217, 138, 138, 0.3);
+  border-radius: 16px;
+  padding: 26px 28px;
+  text-align: center;
+  backdrop-filter: blur(20px);
+}
+.fatal-title {
+  font-size: 12px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--danger);
+  margin-bottom: 10px;
+}
+.fatal-msg {
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--text-dim);
+}
+
 /* ---------------- toast ---------------- */
 
 .toast {

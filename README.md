@@ -52,6 +52,12 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
 
 ## Troubleshooting
 
+- **Window says "GOJO bridge offline" (full-screen message):** the UI
+  couldn't reach the Python engine. Close GOJO, run `python -m gojo.app`
+  again from the terminal, and read any terminal output.
+- **Terminal shows `[gojo] page loaded — UI bridge ready`:** the window's
+  page and bridge came up correctly; if controls still misbehave, that
+  message is the marker to paste with any bug report.
 - **Window doesn't open, error mentions WebView2:** install the free
   "Microsoft Edge WebView2 Runtime" from Microsoft, then run again.
 - **`py` not recognized:** use `python -m venv .venv` instead.
@@ -66,6 +72,7 @@ python -m tests.test_state
 python -m tests.test_commands
 python -m tests.test_transcript
 python -m tests.test_api
+python -m tests.test_app_wiring   (bridge wiring contract, pywebview 6.x)
 ```
 
 ## Project layout

@@ -20,15 +20,25 @@ import webview
 from . import __version__
 from .ai.base import AIProvider
 from .ai.router import build_router
-from .config import load_settings
+from .config import Settings, load_settings
 from .core.state import AppState, StateManager
 from .transcript import TranscriptStore
 from .ui import WEB_DIR
 from .ui.api import GojoAPI
 
 
-def main() -> int:
-    settings = load_settings()
+def create_app(settings: Settings | None = None):
+    """Build the full app (window + bridge) WITHOUT starting the event loop.
+
+    CRITICAL: `js_api=api` is what makes `window.pywebview.api` exist inside
+    the page. Without it the front-end has no bridge and every button is
+    dead — this exact regression is guarded by tests/test_app_wiring.py.
+
+    Returns (window, api). main() starts the loop; tests can build the app
+    headless and verify the real pywebview wiring.
+    """
+    if settings is None:
+        settings = load_settings()
 
     # The brain is optional at startup: if the key is missing we still open
     # the window, and the chat surfaces the friendly setup instructions.
@@ -60,6 +70,7 @@ def main() -> int:
     window = webview.create_window(
         title="GOJO",
         url=str(WEB_DIR / "index.html"),
+        js_api=api,  # <-- the bridge. Exposed to the page as window.pywebview.api
         width=1060,
         height=720,
         min_size=(900, 620),
@@ -67,6 +78,16 @@ def main() -> int:
     )
     api.attach_window(window)
 
+    def _on_loaded(*_args) -> None:
+        print("[gojo] page loaded — UI bridge ready")
+
+    window.events.loaded += _on_loaded
+
+    return window, api
+
+
+def main() -> int:
+    create_app()
     webview.start()
     return 0
 
