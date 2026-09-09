@@ -1,0 +1,11 @@
+# secrets — never commit the real .env
+.env
+
+# python
+__pycache__/
+*.pyc
+.venv/
+
+# local data (memory DB, audio caches, downloads)
+data/
+*.log

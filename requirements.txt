@@ -1,0 +1,4 @@
+# GOJO — Phase 1 dependencies (text chat with a real AI brain)
+# Later phases add more lines here (whisper STT, Piper TTS, webview UI, tools).
+google-genai>=2.0
+python-dotenv>=1.0
