@@ -45,8 +45,12 @@ class TranscriptStore:
         self._new_file()
 
     # -- messages ---------------------------------------------------------
-    def append(self, role: str, text: str) -> None:
+    def append(self, role: str, text: str, via: str | None = None) -> None:
+        """Append one message. `via` marks the origin: "text" | "voice" |
+        "ai" | "system" (optional — old sessions don't have it)."""
         entry = {"role": role, "text": text, "ts": int(time.time())}
+        if via is not None:
+            entry["via"] = via
         with self._current.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 

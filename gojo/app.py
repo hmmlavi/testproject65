@@ -3,13 +3,15 @@
 Run:
     python -m gojo.app
 
-Starts the local desktop window (pywebview) wired to the existing AI brain.
-No server, no open ports: the UI talks to Python through pywebview's
-built-in JS bridge (gojo/ui/api.py). If a later phase needs a real local
-HTTP API (Android companion, etc.), it is added on top of the same core.
+Starts the local desktop window (pywebview) wired to the existing AI brain
+and the Phase 3 voice pipeline. No server, no open ports: the UI talks to
+Python through pywebview's built-in JS bridge (gojo/ui/api.py). If a later
+phase needs a real local HTTP API (Android companion, etc.), it is added on
+top of the same core.
 
-Per spec, GOJO boots in the SLEEPING state — press power (or, in Phase 3,
-"Wake up Gojo") to activate it.
+Per spec, GOJO boots in the SLEEPING state — press power (or, in Phase 4,
+"Wake up Gojo") to activate it. Voice is press-to-talk: the mic is only
+ever open while the user is talking.
 """
 from __future__ import annotations
 
@@ -22,13 +24,22 @@ from .ai.base import AIProvider
 from .ai.router import build_router
 from .config import Settings, load_settings
 from .core.state import AppState, StateManager
+from .prefs import Prefs
 from .transcript import TranscriptStore
 from .ui import WEB_DIR
 from .ui.api import GojoAPI
+from .voice.pipeline import VoicePipeline
+from .voice.playback import AudioPlayer
+from .voice.recorder import VoiceRecorder
+from .voice.stt import WhisperSTT
+from .voice.tts.fish_audio import FishAudioTTS
+from .voice.tts.router import TTSRouter
+from .voice.tts.windows_tts import WindowsTTS
 
 
 def create_app(settings: Settings | None = None):
-    """Build the full app (window + bridge) WITHOUT starting the event loop.
+    """Build the full app (window + bridge + voice) WITHOUT starting the
+    event loop.
 
     CRITICAL: `js_api=api` is what makes `window.pywebview.api` exist inside
     the page. Without it the front-end has no bridge and every button is
@@ -51,6 +62,14 @@ def create_app(settings: Settings | None = None):
 
     state = StateManager(initial=AppState.SLEEPING)
     transcript = TranscriptStore(settings.data_dir)
+    prefs = Prefs(
+        settings.data_dir / "gojo_prefs.json",
+        defaults={
+            "voice_enabled": settings.voice_enabled,
+            "tts_autoplay": settings.tts_autoplay,
+            "tts_provider": settings.tts_provider,
+        },
+    )
     api = GojoAPI(
         settings=settings,
         brain=brain,
@@ -58,6 +77,7 @@ def create_app(settings: Settings | None = None):
         transcript=transcript,
         brain_error=brain_error,
         version=__version__,
+        prefs=prefs,
     )
 
     # Resume the previous session's context so the AI history matches the
@@ -66,6 +86,35 @@ def create_app(settings: Settings | None = None):
         role = item.get("role")
         if role in ("user", "model"):
             api.note_history(role, item.get("text", ""))
+
+    # Voice (Phase 3): recorder -> whisper STT -> shared brain path ->
+    # TTS (Fish, local Windows fallback) -> speakers.
+    # Heavy dependencies (sounddevice, faster-whisper, pyttsx3) are imported
+    # lazily inside first use, so building the app stays light and fast.
+    player = AudioPlayer()
+    AudioPlayer.sweep_stale(settings.data_dir / "audio")
+    pipeline = VoicePipeline(
+        state=state,
+        recorder=VoiceRecorder(),
+        stt=WhisperSTT(settings.stt_model_size),
+        tts=TTSRouter(
+            [
+                FishAudioTTS(
+                    api_key=settings.fish_api_key,
+                    model_id=settings.fish_model_id,
+                    model=settings.fish_model,
+                ),
+                WindowsTTS(),
+            ],
+            order=prefs.get("tts_provider"),
+        ),
+        player=player,
+        on_text=api._run_turn,
+        prefs=prefs,
+        on_note=api._set_note,
+        audio_dir=settings.data_dir / "audio",
+    )
+    api.attach_voice(pipeline)
 
     window = webview.create_window(
         title="GOJO",

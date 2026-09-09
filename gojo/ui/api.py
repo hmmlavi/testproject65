@@ -2,10 +2,12 @@
 
 Every capability the UI has goes through this class: small methods, plain
 JSON-serializable dict results, no window required for the logic — which
-is why the whole thing is testable headless (see tests/test_api.py).
+is why the whole thing is testable headless (see tests/test_api.py and
+tests/test_app_wiring.py).
 
 Rules:
-- The UI never talks to the brain directly; it calls chat() and renders.
+- The UI never talks to the brain directly; it calls chat() / the voice
+  pipeline, and renders the result.
 - Destructive operations (clear_data) must be confirmed by the UI first.
 - This bridge is transport-agnostic. If a later phase needs a real HTTP
   API (e.g. the Android companion), it is added on top of the same core —
@@ -13,18 +15,28 @@ Rules:
 """
 from __future__ import annotations
 
+import logging
+import threading
+
 from ..ai.base import AIProvider, ChatMessage
 from ..ai.prompts import GOJO_SYSTEM_PROMPT
 from ..config import Settings
 from ..core.commands import detect_direct_command
 from ..core.state import AppState, StateManager
+from ..prefs import Prefs
 from ..transcript import TranscriptStore
+
+logger = logging.getLogger("gojo.ui.api")
 
 # Canned acks for direct commands. These are system acknowledgements, not
 # AI-generated text — that's fine and honest: a "sleep" command doesn't
 # need the brain.
 SLEEP_ACK = "Ja raha hoon, boss. Power dabao ya 'wake up' bolo — main wapas aa jaunga."
 WAKE_ACK = "Main hoon. Kya karna hai?"
+
+
+class BrainError(Exception):
+    """The brain failed mid-turn. The caller decides how to surface it."""
 
 
 class GojoAPI:
@@ -36,6 +48,7 @@ class GojoAPI:
         transcript: TranscriptStore,
         brain_error: str | None = None,
         version: str = "0.0.0",
+        prefs: Prefs | None = None,
     ) -> None:
         self._settings = settings
         self._brain = brain
@@ -45,12 +58,26 @@ class GojoAPI:
         self._version = version
         self._history: list[ChatMessage] = []
         self._window = None  # attached by app.py once the window exists
+        self._voice = None  # VoicePipeline, attached by app.py
+        self._prefs = prefs or Prefs(
+            settings.data_dir / "gojo_prefs.json",
+            defaults={
+                "voice_enabled": settings.voice_enabled,
+                "tts_autoplay": settings.tts_autoplay,
+                "tts_provider": settings.tts_provider,
+            },
+        )
+        self._note = None
+        self._note_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # window plumbing (no-ops headless so tests don't need a window)
     # ------------------------------------------------------------------
     def attach_window(self, window) -> None:
         self._window = window
+
+    def attach_voice(self, pipeline) -> None:
+        self._voice = pipeline
 
     def minimize(self) -> dict:
         if self._window is None:
@@ -65,6 +92,13 @@ class GojoAPI:
         return {"ok": True}
 
     # ------------------------------------------------------------------
+    # notes (one-line UI messages from the voice pipeline — read once)
+    # ------------------------------------------------------------------
+    def _set_note(self, kind: str, message: str) -> None:
+        with self._note_lock:
+            self._note = {"text": message, "error": kind == "error"}
+
+    # ------------------------------------------------------------------
     # lifecycle (power button)
     # ------------------------------------------------------------------
     def wake(self) -> dict:
@@ -76,44 +110,73 @@ class GojoAPI:
         return {"ok": True, "status": self._status()}
 
     # ------------------------------------------------------------------
-    # chat — the main path. UI sends text, gets a renderable result.
+    # chat — text path. Voice arrives via the pipeline, into the SAME
+    # _run_turn below (spec: one brain path, no second implementation).
     # ------------------------------------------------------------------
     def chat(self, text: str) -> dict:
         text = (text or "").strip()
         if not text:
             return {"ok": False, "error": "Empty message."}
-
         if self._state.state is AppState.SLEEPING:
             return {"ok": False, "error": "GOJO is sleeping. Press power to wake me first."}
+        try:
+            out = self._run_turn(text, via="text")
+        except BrainError as exc:
+            return {"ok": False, "error": str(exc), "status": self._status()}
+        return {"ok": True, **out, "status": self._status()}
 
-        # Direct commands short-circuit the brain (cheap, instant, real).
+    def _run_turn(self, text: str, via: str = "text") -> dict:
+        """The shared brain path for text AND voice.
+
+        Returns {"kind": "reply"|"command", "reply": str}.
+        Raises BrainError if the brain fails (caller surfaces it).
+        """
+        # Direct commands short-circuit the brain (cheap, instant, real) —
+        # including when spoken: "gojo, sleep" works by voice too.
         command = detect_direct_command(text)
+        if command and self._state.state is AppState.LISTENING:
+            self._state.stop_listening()  # safety net for command path
         if command == "sleep":
-            self._transcript.append("user", text)
-            self._transcript.append("model", SLEEP_ACK)
+            self._transcript.append("user", text, via=via)
+            self._transcript.append("model", SLEEP_ACK, via="system")
             self._state.sleep()
-            return {"ok": True, "kind": "command", "reply": SLEEP_ACK, "status": self._status()}
+            return {"kind": "command", "reply": SLEEP_ACK}
         if command == "wake":
-            # We're already awake here (sleeping was blocked above).
-            return {"ok": True, "kind": "command", "reply": WAKE_ACK, "status": self._status()}
+            # We're already awake here (sleeping was blocked by the caller).
+            return {"kind": "command", "reply": WAKE_ACK}
 
         if self._brain is None:
-            return {"ok": False, "error": self._brain_error or "No AI brain configured."}
+            raise BrainError(self._brain_error or "No AI brain configured.")
 
         self._state.begin_thinking()
         self._history.append(ChatMessage(role="user", text=text))
         try:
             reply = self._brain.chat(self._history, GOJO_SYSTEM_PROMPT)
-        except Exception as exc:  # surface to the UI; never crash the app
+        except Exception as exc:  # surface to the caller; never crash the app
             self._history.pop()  # a failed turn must not poison the history
             self._state.end_thinking()
-            return {"ok": False, "error": f"Brain error: {exc}", "status": self._status()}
+            raise BrainError(f"Brain error: {exc}") from exc
 
         self._history.append(ChatMessage(role="model", text=reply))
-        self._transcript.append("user", text)
-        self._transcript.append("model", reply)
+        self._transcript.append("user", text, via=via)
+        self._transcript.append("model", reply, via="ai")
         self._state.end_thinking()  # applies any pending sleep here
-        return {"ok": True, "kind": "reply", "reply": reply, "status": self._status()}
+        return {"kind": "reply", "reply": reply}
+
+    # ------------------------------------------------------------------
+    # voice (Phase 3) — thin pass-through to the pipeline
+    # ------------------------------------------------------------------
+    def start_talk(self) -> dict:
+        if self._voice is None:
+            return {"ok": False, "error": "Voice system not initialized."}
+        if not (self._prefs.get("voice_enabled") and self._settings.voice_enabled):
+            return {"ok": False, "error": "Voice is turned off in Settings."}
+        return self._voice.start_talk()
+
+    def stop_talk(self) -> dict:
+        if self._voice is None:
+            return {"ok": False, "error": "Voice system not initialized."}
+        return self._voice.stop_talk()
 
     # ------------------------------------------------------------------
     # transcript
@@ -134,10 +197,15 @@ class GojoAPI:
     # status / settings
     # ------------------------------------------------------------------
     def _status(self) -> dict:
+        with self._note_lock:
+            note = self._note
+            self._note = None  # read-once
         return {
             "state": self._state.state.value,
             "provider": self._settings.provider,
             "model": self._settings.gemini_model,
+            "busy": self._voice.busy if self._voice is not None else False,
+            "note": note,
         }
 
     def get_status(self) -> dict:
@@ -151,6 +219,35 @@ class GojoAPI:
             "data_dir": str(self._settings.data_dir),
             "version": self._version,
         }
+
+    def get_voice_settings(self) -> dict:
+        s = self._settings
+        fish_key = s.fish_api_key or ""
+        return {
+            "ok": True,
+            "voice_enabled": bool(self._prefs.get("voice_enabled") and s.voice_enabled),
+            "tts_autoplay": bool(self._prefs.get("tts_autoplay")),
+            "tts_provider": self._prefs.get("tts_provider"),
+            "fish_configured": bool(
+                fish_key and not fish_key.strip().lower().startswith("paste-")
+            ),
+            "fish_voice": s.fish_model_id,
+            "stt_model": s.stt_model_size,
+            "player_available": self._voice.player_available if self._voice else False,
+        }
+
+    def set_voice_pref(self, key: str, value) -> dict:
+        try:
+            prefs = self._prefs.set(key, value)
+        except ValueError as exc:
+            return {"ok": False, "error": str(exc)}
+        # apply live where it matters
+        if key == "tts_provider" and self._voice is not None:
+            try:
+                self._voice.tts.set_order(value)
+            except ValueError:
+                return {"ok": False, "error": f"Unknown TTS provider: {value!r}"}
+        return {"ok": True, "prefs": prefs}
 
     # ------------------------------------------------------------------
     # destructive — the UI must confirm before calling
