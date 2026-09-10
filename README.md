@@ -157,6 +157,19 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
   (~460 MB) into its cache, then STT runs fully offline.
 - **GOJO answered but you heard nothing:** check Windows volume/mute, and
   Settings → Voice → "Reply with voice" is on.
+- **Voice stops responding for any reason (no transcript / no wake):**
+  run the voice doctor on the PC (close the GOJO window first):
+  ```bat
+  python -m gojo.voice.doctor
+  ```
+  It walks the exact runtime path — device → stream rate → capture →
+  peak/RMS → resample → Whisper load → transcript → brain routing →
+  wake-listener probe — and prints a numbered report (`[1]`…`[10]`,
+  `[W1]`…`[W5]`). Send the whole output. Nothing is recorded, stored, or
+  sent anywhere; no keys are read. Also: Settings → Voice → **Test**
+  button now proves the mic is non-silent (shows samples, peak, RMS and
+  says `MIC SILENT` if no audio is arriving — e.g. AudioRelay left in
+  Playback mode).
 - **Saying "Hey Gojo" does nothing:** (1) Settings → Voice → "Wake word"
   must be ticked and the pill must say **wake listening** (not just
   sleeping); (2) **check the Mic row + Test button** — GOJO listens to

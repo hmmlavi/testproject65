@@ -173,6 +173,9 @@ class GojoAPI:
         if self._brain is None:
             raise BrainError(self._brain_error or "No AI brain configured.")
 
+        # Diagnostic line: facts only — never the conversation content.
+        logger.info("brain: via=%s input=%d chars (model=%s)",
+                    via, len(text), self._settings.gemini_model)
         self._state.begin_thinking()
         self._history.append(ChatMessage(role="user", text=text))
         try:
@@ -182,6 +185,7 @@ class GojoAPI:
             self._state.end_thinking()
             raise BrainError(f"Brain error: {exc}") from exc
 
+        logger.info("brain: reply=%d chars", len(reply))
         self._history.append(ChatMessage(role="model", text=reply))
         self._transcript.append("user", text, via=via)
         self._transcript.append("model", reply, via="ai")

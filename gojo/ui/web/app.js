@@ -387,15 +387,23 @@ async function loadVoiceSettings() {
 }
 
 function onMicTest() {
-  toast("Mic test — speak now… (~1 s, level only, nothing is recorded)");
+  toast("Mic test — speak now… (~1 s, level only — nothing is recorded or stored)");
   callApi("test_mic")
     .then((r) => {
       if (r.ok) {
-        const quiet =
-          r.peak < 0.003
-            ? " — very quiet: speak closer, or check GOJO_MIC_DEVICE in .env"
-            : "";
-        toast(`Mic OK: ${r.device} · ${r.frames} samples · peak ${r.peak}${quiet}`);
+        if (r.silent) {
+          toast(
+            `MIC SILENT: ${r.device} — ${r.frames} samples but NO audio ` +
+            `(peak ${r.peak}, rms ${r.rms}). Check AudioRelay: it must be in ` +
+            "MIC mode (not Playback), phone connected, volume up.",
+            true,
+          );
+        } else {
+          toast(
+            `Mic OK: ${r.device} · ${r.frames} samples · peak ${r.peak} · ` +
+            `rms ${r.rms} (audio IS arriving)`,
+          );
+        }
       } else {
         toast(r.error || "Mic test failed", true);
       }

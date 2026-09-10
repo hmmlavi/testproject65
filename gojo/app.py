@@ -100,7 +100,10 @@ def create_app(settings: Settings | None = None):
         # phone-mic setup must name the device explicitly — the Settings
         # panel shows which device GOJO actually uses + a Test button.
         recorder=VoiceRecorder(device_spec=settings.mic_device),
-        stt=WhisperSTT(settings.stt_model_size),
+        # first-run model download announces itself in the UI (a one-time
+        # 460 MB download must never look like a frozen "listening")
+        stt=WhisperSTT(settings.stt_model_size,
+                       on_loading=lambda m: api._set_note("info", m)),
         tts=TTSRouter(
             [
                 FishAudioTTS(

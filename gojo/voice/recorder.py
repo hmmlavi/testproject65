@@ -47,6 +47,7 @@ class VoiceRecorder:
         self._stream_factory = stream_factory  # None -> real sounddevice
         self._device_spec = (device_spec or "").strip()  # GOJO_MIC_DEVICE
         self._last_device = ""
+        self._stream_sr = 0
         self._sr = sample_rate
         self._silence_rms = silence_rms
         self._silence_seconds = silence_seconds
@@ -126,6 +127,7 @@ class VoiceRecorder:
                 stream_sr = int(getattr(stream, "samplerate", 0) or stream_sr)
                 self._last_device = f"{dev['name']} (index {dev['index']}, {stream_sr} Hz)"
                 logger.info("recording from: %s", self._last_device)
+            self._stream_sr = stream_sr
         except Exception as exc:  # noqa: BLE001 — no mic, no PortAudio, permissions...
             self._fatal = f"No microphone available: {exc}"
             self._finish()
@@ -192,9 +194,22 @@ class VoiceRecorder:
             )
             if self._fatal:
                 logger.error("recording failed: %s", self._fatal)
-            else:
+            elif audio is not None:
+                # session diagnostic line: device, rate, resample, counts,
+                # level — never the audio content
+                from .level import level_stats
+
+                st = level_stats(audio)
                 logger.info(
-                    "recorded %.1fs (%s)", duration, self._stopped_by or "unknown"
+                    "recorder: device=%s stream=%dHz resampled_to_16k=%s "
+                    "16k_samples=%d (%.1fs) peak=%s rms=%s stopped_by=%s",
+                    self._last_device or "injected (test)",
+                    self._stream_sr or self._sr,
+                    self._stream_sr not in (0, self._sr),
+                    st["frames"], duration, st["peak"], st["rms"],
+                    self._stopped_by or "unknown",
                 )
+            else:
+                logger.info("recorded nothing (stopped_by=%s)", self._stopped_by or "unknown")
         except Exception as exc:  # noqa: BLE001
             self._result = RecordingResult(ok=False, error=f"Failed to collect audio: {exc}")

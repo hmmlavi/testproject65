@@ -160,31 +160,37 @@ def open_input_stream(spec: str, sr: int = 16000):
 
 def read_peak(spec: str, seconds: float = 1.2, sr: int = 16000) -> dict:
     """Read ~``seconds`` of audio from the resolved device and report level
-    stats only. NO audio is stored, saved, or sent anywhere — the result is
-    the device name, sample count, and peak amplitude."""
+    stats only. This PROVES the capture is non-silent: it returns the
+    sample count, peak AND rms, plus an explicit silent/audible verdict.
+    NO audio is stored, saved, played, or sent anywhere."""
     import numpy as np
 
+    from .level import level_stats
+
     stream, dev, _stream_sr = open_input_stream(spec, sr)
-    frames = 0
-    peak = 0.0
+    chunks: list = []
     n = max(1, int(sr * 0.1))
     t0 = time.time()
     try:
         with stream:
             while time.time() - t0 < seconds:
                 data, _overflow = stream.read(n)
-                arr = np.asarray(data).flatten()
-                frames += int(arr.size)
-                if arr.size:
-                    p = float(np.max(np.abs(arr)))
-                    if p > peak:
-                        peak = p
+                chunks.append(np.asarray(data).flatten())
     finally:
-        logger.info("mic test done: %s — %d samples, peak %.4f", dev["name"], frames, peak)
+        pass  # context manager closes the stream
+    raw = np.concatenate(chunks) if chunks else np.zeros(0, dtype=np.float32)
+    stats = level_stats(raw)
+    logger.info(
+        "mic test: %s — %d samples, peak %.4f, rms %.4f (%s)",
+        dev["name"], stats["frames"], stats["peak"], stats["rms"],
+        "SILENT" if stats["silent"] else "audible",
+    )
     return {
         "ok": True,
         "device": dev["name"],
         "index": dev["index"],
-        "frames": frames,
-        "peak": round(peak, 4),
+        "frames": stats["frames"],
+        "peak": stats["peak"],
+        "rms": stats["rms"],
+        "silent": stats["silent"],
     }

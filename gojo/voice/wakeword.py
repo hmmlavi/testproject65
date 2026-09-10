@@ -188,6 +188,7 @@ class WhisperWakeWord(WakeWordEngine):
         silence_rms: float = 0.006,
         cooldown_seconds: float = 3.0,
         hotwords: str = "gojo",
+        on_loading: Optional[Callable[[str], None]] = None,
     ) -> None:
         if model_size not in ("tiny", "base"):
             model_size = "tiny"  # CPU budget: never load a big model here
@@ -200,17 +201,34 @@ class WhisperWakeWord(WakeWordEngine):
         self._silence_rms = silence_rms
         self._cooldown = cooldown_seconds
         self._hotwords = hotwords
+        self._on_loading = on_loading  # announced once, before first real load
+        self._load_notified = False
         self._buf = np.zeros(0, dtype=np.float32)
         self._model = None  # lazy — first transcribe only
         self._last_match = 0.0
+
+    def _notify_loading(self) -> None:
+        if self._load_notified or self._on_loading is None:
+            return
+        self._load_notified = True
+        try:
+            self._on_loading(
+                "Pehli baar: wake model load ho raha hai (~75 MB, ek hi dafa). "
+                "Thodi der sunne mein late ho sakta hoon."
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("wake on_loading hook failed")
 
     def _get_model(self):
         if self._model is None:
             from faster_whisper import WhisperModel  # heavy: lazy
 
+            self._notify_loading()
             logger.info("loading wake-word model '%s' (one-time download on first use)",
                         self._model_size)
+            t0 = time.time()
             self._model = WhisperModel(self._model_size, device="cpu", compute_type="int8")
+            logger.info("wake-word model loaded in %.1fs", time.time() - t0)
         return self._model
 
     def _transcribe(self, chunk: np.ndarray) -> str:
@@ -241,13 +259,17 @@ class WhisperWakeWord(WakeWordEngine):
                 try:
                     text = self._transcribe(chunk)
                 except Exception:  # noqa: BLE001 — detection is best-effort
+                    # first-run model-download failures land here; the detail
+                    # (incl. network errors) is in the traceback below
                     logger.exception("wake transcription failed")
                     continue
+                # diagnostic line: facts only — never the transcript content
+                logger.info("wake window: %d chars transcribed (rms=%.4f)", len(text), rms)
                 matched = self._matcher(text)
                 if matched:
                     self._last_match = time.time()
                     self._buf = np.zeros(0, dtype=np.float32)
-                    logger.info("wake phrase matched from transcript %r", text)
+                    logger.info("wake phrase matched: %s", matched)
                     return matched
             return None
         except Exception:  # noqa: BLE001 — NEVER let the listener thread die
@@ -380,7 +402,9 @@ class WakeListener:
             self._thread = None
 
 
-def build_wakeword_engine() -> WakeWordEngine:
+def build_wakeword_engine(on_loading: Optional[Callable[[str], None]] = None) -> WakeWordEngine:
     """The real local engine. Cheap to construct (the model itself loads
-    lazily on the first non-silent window)."""
-    return WhisperWakeWord()
+    lazily on the first non-silent window). `on_loading` is announced once
+    before the first real model load (the UI shows it, so a first-run
+    download is never a silent hang)."""
+    return WhisperWakeWord(on_loading=on_loading)

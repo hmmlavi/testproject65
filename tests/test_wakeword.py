@@ -482,6 +482,133 @@ def test_wake_listener_resamples_48k_stream() -> None:
 
 
 # ---------------------------------------------------------------------
+# 2d. level stats + first-load announcements (the "silent hang" fix)
+# ---------------------------------------------------------------------
+
+
+def test_level_stats_audible_and_silent() -> None:
+    from gojo.voice.level import level_stats
+
+    tone = (np.sin(2 * np.pi * 400 * np.arange(16000) / 16000) * 0.1).astype(np.float32)
+    st = level_stats(tone)
+    assert st["frames"] == 16000 and st["silent"] is False
+    assert st["peak"] > 0.05 and st["rms"] > 0.03
+
+    silence = np.zeros(16000, dtype=np.float32)
+    st2 = level_stats(silence)
+    assert st2["silent"] is True and st2["peak"] == 0.0 and st2["rms"] == 0.0
+    assert level_stats(np.zeros(0, dtype=np.float32))["frames"] == 0
+    print("PASS test_level_stats_audible_and_silent")
+
+
+def test_stt_announces_first_model_load_once() -> None:
+    """First STT use may download the model — the UI must be told exactly
+    once (a first-run download must never look like a frozen 'listening')."""
+    from gojo.voice.stt import STTError, WhisperSTT
+
+    notes: list[str] = []
+    stt = WhisperSTT(model_size="tiny", on_loading=notes.append)
+    for _ in range(2):
+        try:
+            stt.transcribe(np.zeros(1600, dtype=np.float32))
+        except STTError:
+            pass  # sandbox: model download unavailable — expected
+    assert len(notes) == 1, "first load must be announced exactly once"
+    print("PASS test_stt_announces_first_model_load_once")
+
+
+def test_wake_engine_announces_first_model_load_once() -> None:
+    notes: list[str] = []
+    eng = WhisperWakeWord(on_loading=notes.append)
+    frame = _speaky(4000)
+    for _ in range(8):  # one full 2 s window -> first real transcribe attempt
+        eng.add_frame(frame)
+    assert len(notes) == 1, "first load must be announced exactly once"
+    for _ in range(8):
+        eng.add_frame(frame)
+    assert len(notes) == 1
+    print("PASS test_wake_engine_announces_first_model_load_once")
+
+
+# ---------------------------------------------------------------------
+# 2e. the voice doctor (numbered real-PC report)
+# ---------------------------------------------------------------------
+
+
+def test_doctor_report_with_fakes() -> None:
+    from gojo.voice.doctor import analyze_capture, run_doctor
+
+    # pure capture analysis (the [3]-[6] core)
+    raw48 = (np.sin(2 * np.pi * 400 * np.arange(48000) / 48000) * 0.05).astype(np.float32)
+    a = analyze_capture(raw48, 48000)
+    assert a["samples"] == 48000 and a["resampled"] is True
+    assert a["samples_16k"] == 16000 and a["silent"] is False
+
+    dev = {"index": 15, "name": "Virtual Mic (AudioRelay)", "channels": 2,
+           "default_samplerate": 48000.0}
+
+    class S:
+        samplerate = 48000
+
+        def __init__(self) -> None:
+            self._t = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+        def read(self, n):
+            t = np.arange(self._t, self._t + n) / 48000
+            self._t += n
+            time.sleep(0.002)
+            return (np.sin(2 * np.pi * 400 * t) * 0.05).astype(np.float32), False
+
+    lines: list[str] = []
+    rc = run_doctor(
+        seconds=0.25,
+        device_spec="15",
+        deps={
+            "open_stream": lambda spec, sr: (S(), dev, 48000),
+            "stt": lambda a16: "hey gojo",
+            "wake_engine": lambda: FakeWakeEngine(),
+        },
+        on_line=lines.append,
+    )
+    text = "\n".join(lines)
+    assert rc == 0, text
+    for needle in (
+        "Virtual Mic (AudioRelay) (index 15)",   # [1] device
+        "48000 Hz",                                # [2] rate
+        "48000 Hz -> 16000 Hz",                    # [5] resample yes
+        "audible",                                 # [4] verdict
+        "transcript: 'hey gojo'",                  # [8] whisper output
+        "direct_command=None",                     # [9] brain routing
+        "RESULT: all steps OK",
+    ):
+        assert needle in text, f"report missing {needle!r}:\n{text}"
+    # wake probe lines present with frame counts
+    assert "[W2]" in text and "frames received" in text
+    print("PASS test_doctor_report_with_fakes")
+
+
+def test_doctor_graceful_without_audio_stack() -> None:
+    """Sandbox truth: no PortAudio -> every hardware step FAILs cleanly,
+    the report still completes, no traceback, exit code 1."""
+    from gojo.voice.doctor import run_doctor
+
+    lines: list[str] = []
+    rc = run_doctor(seconds=0.1, device_spec="", on_line=lines.append)
+    text = "\n".join(lines)
+    assert rc == 1
+    assert "FAIL" in text
+    assert "Traceback" not in text
+    assert "RESULT:" in text
+    print("PASS test_doctor_graceful_without_audio_stack")
+
+
+# ---------------------------------------------------------------------
 # 3. listener: mic handling, callback, clean shutdown
 # ---------------------------------------------------------------------
 
@@ -887,6 +1014,11 @@ def main() -> int:
         test_choose_stream_rate,
         test_recorder_resamples_48k_stream_to_16k,
         test_wake_listener_resamples_48k_stream,
+        test_level_stats_audible_and_silent,
+        test_stt_announces_first_model_load_once,
+        test_wake_engine_announces_first_model_load_once,
+        test_doctor_report_with_fakes,
+        test_doctor_graceful_without_audio_stack,
         test_listener_no_mic_is_a_clean_error,
         test_listener_reports_frames_arriving,
         test_listener_fires_callback_and_stops,

@@ -81,9 +81,13 @@ class VoicePipeline:
         self._ack_fn = ack_fn or _default_ack
         self._mic_warned = False
         self._mic_device = (mic_device or "").strip()
-        # Phase 4: local wake listener (off until the user opts in)
+        # Phase 4: local wake listener (off until the user opts in). The
+        # engine announces its one-time model load so the first run is
+        # never a silent hang.
+        if wake_engine is None:
+            wake_engine = build_wakeword_engine(on_loading=lambda m: self._note("info", m))
         self._listener = WakeListener(
-            wake_engine or build_wakeword_engine(),
+            wake_engine,
             on_wake=self._on_wake,
             stream_factory=wake_stream_factory,
             device_spec=self._mic_device,
@@ -269,8 +273,10 @@ class VoicePipeline:
             self._state.stop_listening()
 
             # SHARED brain path — voice and text both end up here
+            logger.info("voice turn: transcript %d chars -> brain (via=voice)", len(text))
             out = self._on_text(text, via="voice")
             reply = out.get("reply", "")
+            logger.info("voice turn: brain reply %d chars", len(reply))
 
             if (
                 self._prefs.get("tts_autoplay")
