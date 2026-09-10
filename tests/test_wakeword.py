@@ -713,6 +713,207 @@ def test_doctor_graceful_without_audio_stack() -> None:
     print("PASS test_doctor_graceful_without_audio_stack")
 
 
+def test_doctor_inspect_whisper_environment() -> None:
+    from gojo.voice.doctor import inspect_whisper_environment
+
+    env = inspect_whisper_environment()
+    assert isinstance(env, dict)
+    assert "faster_whisper_installed" in env
+    assert "ctranslate2_installed" in env
+    assert "transcribe_defaults" in env
+    assert "temperature_default" in env
+    print("PASS test_doctor_inspect_whisper_environment")
+
+
+def test_doctor_analyze_buffer_forensics() -> None:
+    from gojo.voice.doctor import analyze_buffer_forensics
+
+    # Empty
+    empty = analyze_buffer_forensics(np.zeros(0, dtype=np.float32))
+    assert empty["samples"] == 0 and empty["silent"] is True
+    assert empty["verdict"] == "EMPTY BUFFER"
+
+    # Silent
+    silent = analyze_buffer_forensics(np.zeros(16000, dtype=np.float32))
+    assert silent["samples"] == 16000 and silent["silent"] is True
+    assert "SILENT" in silent["verdict"]
+
+    # Normal tone (0.5 amplitude)
+    tone = (np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000)) * 0.5).astype(np.float32)
+    normal = analyze_buffer_forensics(tone)
+    assert normal["samples"] == 16000 and normal["silent"] is False
+    assert normal["clipping_pct"] == 0.0
+    assert 0.49 <= normal["peak"] <= 0.51
+    assert "NORMAL LEVEL" in normal["verdict"]
+
+    # Clipped (values >= 0.999)
+    clipped_arr = np.array([1.0, -1.0, 0.999, -0.999] * 100 + [0.1] * 100, dtype=np.float32)
+    clipped = analyze_buffer_forensics(clipped_arr)
+    assert clipped["clipping_pct"] > 50.0
+    assert "CLIPPING" in clipped["verdict"]
+    print("PASS test_doctor_analyze_buffer_forensics")
+
+
+def test_doctor_save_buffer_to_wav() -> None:
+    import wave
+    from gojo.voice.doctor import save_buffer_to_wav
+
+    tone = (np.sin(2 * np.pi * 440 * np.linspace(0, 1, 16000)) * 0.5).astype(np.float32)
+    wav_path = save_buffer_to_wav(tone)
+    try:
+        assert wav_path.exists()
+        with wave.open(str(wav_path), "rb") as wf:
+            assert wf.getnchannels() == 1
+            assert wf.getsampwidth() == 2
+            assert wf.getframerate() == 16000
+            assert wf.getnframes() == 16000
+    finally:
+        if wav_path.exists():
+            wav_path.unlink()
+    print("PASS test_doctor_save_buffer_to_wav")
+
+
+def test_doctor_test_mono_stereo_handling() -> None:
+    from gojo.voice.doctor import test_mono_stereo_handling
+
+    def mock_transcribe(audio, beam_size=1, **kw):
+        if isinstance(audio, np.ndarray) and audio.ndim > 1:
+            raise ValueError(f"expected 1D array, got ndim={audio.ndim}")
+        return [FakeSeg(0.0, 1.0, "test")], FakeInfo()
+
+    lines: list[str] = []
+    buf16 = np.zeros(16000, dtype=np.float32)
+    with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tf:
+        wav_path = Path(tf.name)
+    try:
+        import wave
+
+        with wave.open(str(wav_path), "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(np.zeros(16000, dtype=np.int16).tobytes())
+
+        res = test_mono_stereo_handling(mock_transcribe, buf16, wav_path=wav_path, on_line=lines.append)
+        assert res["1d_mono"]["status"] == "OK"
+        assert "REJECTED" in res["2d_mono"]["status"]
+        assert "REJECTED" in res["2d_stereo"]["status"]
+        assert res["wav_path"]["status"] == "OK"
+    finally:
+        if wav_path.exists():
+            wav_path.unlink()
+    print("PASS test_doctor_test_mono_stereo_handling")
+
+
+def test_doctor_run_stt_deep_matrix() -> None:
+    from gojo.voice.doctor import run_stt_deep
+
+    def mock_small_transcribe(audio, **kw):
+        lang = kw.get("language") or "en"
+        text = "hey gojo" if lang == "en" else "hello gojo"
+        if isinstance(kw.get("temperature"), (list, tuple)) and len(kw["temperature"]) > 1:
+            time.sleep(0.01)
+        return [FakeSeg(0.0, 1.0, text)], FakeInfo()
+
+    def mock_tiny_transcribe(audio, **kw):
+        return [FakeSeg(0.0, 0.5, "hey gojo")], FakeInfo()
+
+    lines: list[str] = []
+    buf16 = np.zeros(16000, dtype=np.float32)
+    report = run_stt_deep(
+        small_transcribe=mock_small_transcribe,
+        tiny_transcribe=mock_tiny_transcribe,
+        buf16=buf16,
+        wav_path=None,
+        on_line=lines.append,
+    )
+    text = "\n".join(lines)
+    assert len(report["results"]) >= 12
+    assert any(r["model"] == "small" for r in report["results"])
+    assert any(r["model"] == "tiny" for r in report["results"])
+    assert any("temp=0.0" in r["label"] for r in report["results"])
+    assert any("temp=(0.0,)" in r["label"] for r in report["results"])
+    assert any("temp=fallback" in r["label"] for r in report["results"])
+    assert any("no_ts=T" in r["label"] for r in report["results"])
+    assert any("beam=5" in r["label"] for r in report["results"])
+    assert any("lang=en" in r["label"] for r in report["results"])
+    assert any("lang=hi" in r["label"] for r in report["results"])
+    assert len(report["findings"]) >= 2
+    assert "WAKE MATCH" in text
+    print("PASS test_doctor_run_stt_deep_matrix")
+
+
+def test_doctor_report_with_stt_deep_end_to_end() -> None:
+    from gojo.voice.doctor import run_doctor
+
+    dev = {"index": 15, "name": "Virtual Mic (AudioRelay)", "channels": 2,
+           "default_samplerate": 48000.0}
+
+    class S:
+        samplerate = 48000
+
+        def __init__(self) -> None:
+            self._t = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e):
+            return False
+
+        def read(self, n):
+            t = np.arange(self._t, self._t + n) / 48000
+            self._t += n
+            time.sleep(0.002)
+            return (np.sin(2 * np.pi * 400 * t) * 0.05).astype(np.float32), False
+
+    def mock_transcribe(audio, **kw):
+        if isinstance(audio, np.ndarray) and audio.ndim > 1:
+            raise ValueError("expected 1D array")
+        return [FakeSeg(0.0, 1.0, "hey gojo")], FakeInfo()
+
+    lines: list[str] = []
+    rc = run_doctor(
+        seconds=0.25,
+        device_spec="15",
+        stt_deep=True,
+        deps={
+            "open_stream": lambda spec, sr: (S(), dev, 48000),
+            "stt": lambda a16: "hey gojo",
+            "wake_engine": lambda: FakeWakeEngine(),
+            "model_small": mock_transcribe,
+            "model_tiny": mock_transcribe,
+        },
+        on_line=lines.append,
+    )
+    text = "\n".join(lines)
+    assert rc == 0, text
+    for needle in (
+        "GOJO STT DEEP-DIVE & AUDIO FORENSICS (--stt-deep)",
+        "[A] FASTER-WHISPER ENVIRONMENT INSPECTION:",
+        "[B] CAPTURED BUFFER & LOCAL WAV FORENSICS:",
+        "[C] INPUT FORMAT & MONO/STEREO HANDLING TEST:",
+        "[D] DECODING CONFIGURATIONS MATRIX",
+        "[E] DETAILED TRANSCRIPTS",
+        "[F] FORENSIC SUMMARY",
+        "WAV exported locally to",
+        "Digital clipping",
+        "RESULT: all steps OK",
+    ):
+        assert needle in text, f"stt-deep report missing {needle!r}:\n{text}"
+    print("PASS test_doctor_report_with_stt_deep_end_to_end")
+
+
+def test_doctor_main_cli_flags() -> None:
+    from gojo.voice.doctor import main
+
+    try:
+        main(["--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+    print("PASS test_doctor_main_cli_flags")
+
+
 # ---------------------------------------------------------------------
 # 3. listener: mic handling, callback, clean shutdown
 # ---------------------------------------------------------------------
@@ -1129,6 +1330,13 @@ def main() -> int:
         test_doctor_all_five_phrases_matcher,
         test_doctor_report_with_fakes,
         test_doctor_graceful_without_audio_stack,
+        test_doctor_inspect_whisper_environment,
+        test_doctor_analyze_buffer_forensics,
+        test_doctor_save_buffer_to_wav,
+        test_doctor_test_mono_stereo_handling,
+        test_doctor_run_stt_deep_matrix,
+        test_doctor_report_with_stt_deep_end_to_end,
+        test_doctor_main_cli_flags,
         test_listener_no_mic_is_a_clean_error,
         test_listener_reports_frames_arriving,
         test_listener_fires_callback_and_stops,
