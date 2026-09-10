@@ -531,8 +531,113 @@ def test_wake_engine_announces_first_model_load_once() -> None:
 
 
 # ---------------------------------------------------------------------
-# 2e. the voice doctor (numbered real-PC report)
+# 2d2. STT config: format identity + language pin (Phase 4 real-PC fix)
 # ---------------------------------------------------------------------
+
+
+def test_recorder_chunk_resample_equals_whole_buffer_resample() -> None:
+    """Requirement: the audio the app feeds Whisper (per-250ms-chunk
+    resample + concat) must be IDENTICAL in format/range/rate to what
+    the doctor feeds Whisper (whole-buffer resample). For 48k->16k (3:1)
+    on chunk-aligned buffers the math is exact."""
+    sr = 48000
+    frame = sr // 4  # 12000 — exactly divisible by 3
+    full = (np.sin(2 * np.pi * 400 * np.arange(8 * sr) / sr) * 0.05).astype(np.float32)
+    per_chunk = np.concatenate(
+        [resample_to_target(full[i:i + frame], sr, 16000)
+         for i in range(0, len(full), frame)]
+    )
+    whole = resample_to_target(full, sr, 16000)
+    assert per_chunk.dtype == whole.dtype == np.float32
+    assert per_chunk.size == whole.size == 8 * 16000
+    assert np.array_equal(per_chunk, whole), "app and doctor audio must be identical"
+    # 16k input must pass through untouched (no double conversion)
+    buf16 = full[::3]
+    assert np.array_equal(resample_to_target(buf16, 16000, 16000), buf16)
+    print("PASS test_recorder_chunk_resample_equals_whole_buffer_resample")
+
+
+def test_stt_language_pin_and_vad_off() -> None:
+    """The real-PC fix: STT must (a) accept a language pin ('hi'/'en'/...)
+    with auto-detect as default, and (b) run with VAD off (the recorder
+    already endpoints; Silero VAD was the prime suspect for empty
+    Hindi/Hinglish transcripts)."""
+    import inspect
+    from gojo.voice.stt import WhisperSTT
+
+    assert WhisperSTT().language == ""  # auto by default
+    assert WhisperSTT(language="HI").language == "hi"  # normalized
+    src = inspect.getsource(WhisperSTT._real_transcribe)
+    assert "vad_filter=False" in src, "app STT must not use Silero VAD"
+    assert "self._language or None" in src, "language pin must reach transcribe"
+    print("PASS test_stt_language_pin_and_vad_off")
+
+
+def test_settings_stt_language_env() -> None:
+    import os
+    from gojo.config import load_settings
+
+    os.environ["GOJO_STT_LANGUAGE"] = "hi"
+    try:
+        assert load_settings().stt_language == "hi"
+    finally:
+        del os.environ["GOJO_STT_LANGUAGE"]
+    assert load_settings().stt_language == ""
+    print("PASS test_settings_stt_language_env")
+
+
+# ---------------------------------------------------------------------
+# 2e. the voice doctor (numbered real-PC report) + deep-dive
+# ---------------------------------------------------------------------
+
+
+class FakeSeg:
+    def __init__(self, start, end, text, nsp=0.1, comp=1.1, lp=-0.3):
+        self.start, self.end, self.text = start, end, text
+        self.no_speech_prob, self.compression_ratio, self.avg_logprob = nsp, comp, lp
+
+
+class FakeInfo:
+    language = "hi"
+    language_probability = 0.82
+
+
+def test_doctor_deep_dive_matrix() -> None:
+    """The A/B deep-dive: 4 configs on one sample; VAD-on simulates the
+    old empty result, others produce text; per-segment detail + the
+    matcher run on the ACTUAL recognized text must all be reported."""
+    from gojo.voice.doctor import whisper_deep_dive
+
+    def fake_transcribe(audio, beam_size=1, **kw):
+        # mimic the real failure: VAD on -> nothing; else language-dependent text
+        if kw.get("vad_filter"):
+            return [], FakeInfo()
+        lang = kw.get("language") or "auto"
+        text = {"hi": "hello gojo", "en": "hey gojo", "auto": "helo gojo"}[lang]
+        return [FakeSeg(0.1, 1.2, text)], FakeInfo()
+
+    lines: list[str] = []
+    buf16 = np.zeros(16000, dtype=np.float32)
+    whisper_deep_dive(fake_transcribe, buf16, "", on_line=lines.append)
+    text = "\n".join(lines)
+    for needle in (
+        "[app config]", "[old app config (VAD on)]", "[language=hi]", "[language=en]",
+        "lang=hi p=0.82", "segments=1", "segments=0",
+        "text: <empty>", "text: 'hello gojo'",
+        "seg0: 0.1-1.2s no_speech=0.10",
+        "wake matcher on full text: 'hello gojo'",  # 'helo gojo' -> hello gojo
+    ):
+        assert needle in text, f"deep-dive report missing {needle!r}:\n{text}"
+    print("PASS test_doctor_deep_dive_matrix")
+
+
+def test_doctor_all_five_phrases_matcher() -> None:
+    """Requirement: wake phrase matching must be checked against the
+    ACTUAL five phrases (unit-level, deterministic)."""
+    for phrase in ("Hey Gojo", "Hi Gojo", "Hello Gojo", "Wake up Gojo", "Yo Gojo"):
+        m = match_wake_phrase(phrase)
+        assert m is not None, f"{phrase!r} must match"
+    print("PASS test_doctor_all_five_phrases_matcher")
 
 
 def test_doctor_report_with_fakes() -> None:
@@ -1017,6 +1122,11 @@ def main() -> int:
         test_level_stats_audible_and_silent,
         test_stt_announces_first_model_load_once,
         test_wake_engine_announces_first_model_load_once,
+        test_recorder_chunk_resample_equals_whole_buffer_resample,
+        test_stt_language_pin_and_vad_off,
+        test_settings_stt_language_env,
+        test_doctor_deep_dive_matrix,
+        test_doctor_all_five_phrases_matcher,
         test_doctor_report_with_fakes,
         test_doctor_graceful_without_audio_stack,
         test_listener_no_mic_is_a_clean_error,

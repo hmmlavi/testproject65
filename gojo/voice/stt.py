@@ -1,12 +1,20 @@
 """Speech-to-text (Phase 3): faster-whisper, fully local.
 
-- Auto language detection (English / Hindi / Hinglish — no manual selection)
+- Auto language detection (English / Hindi / Hinglish — no manual
+  selection) unless the user pins one in .env (GOJO_STT_LANGUAGE:
+  'hi', 'en', ... — see the doctor's language matrix)
 - CPU-only, int8 (sized for the i5-6400: `small` default, configurable)
 - One model instance in RAM (loaded lazily on first use) — spec: no
   stack of heavy models
 - The FIRST call may download the model (small ~460 MB, once). The UI is
   told via `on_loading` so the user sees what is happening instead of a
   silent multi-minute wait.
+- `vad_filter=False` — Phase 4 real-PC fix: the recorder ALREADY does
+  RMS endpointing, so a second (Silero) VAD pass was redundant and was
+  the prime suspect for Hindi/Hinglish speech being trimmed to an empty
+  transcript (real-PC doctor: audible 8 s capture -> 0 chars with VAD
+  on). VAD off can only ADD text, never remove speech. The doctor's
+  `--diagnose` matrix still shows the old VAD-on result for comparison.
 - `transcribe_fn` is an injectable test hook (tests never need the model)
 """
 from __future__ import annotations
@@ -26,10 +34,11 @@ class STTError(Exception):
 
 class WhisperSTT:
     def __init__(self, model_size: str = "small", transcribe_fn=None,
-                 on_loading=None) -> None:
+                 on_loading=None, language: str = "") -> None:
         if model_size not in SIZES:
             model_size = "small"
         self._size = model_size
+        self._language = (language or "").strip().lower()  # '' = auto-detect
         self._inject = transcribe_fn
         self._on_loading = on_loading  # callable(message) — announced once
         self._load_notified = False
@@ -38,6 +47,11 @@ class WhisperSTT:
     @property
     def model_size(self) -> str:
         return self._size
+
+    @property
+    def language(self) -> str:
+        """'' = auto-detect; else a BCP code like 'hi' or 'en'."""
+        return self._language
 
     def _notify_loading(self, message: str) -> None:
         if self._load_notified or self._on_loading is None:
@@ -76,14 +90,14 @@ class WhisperSTT:
         t0 = time.time()
         segments, info = model.transcribe(
             audio,
-            language=None,  # auto-detect (EN / HI / Hinglish)
+            language=self._language or None,  # '' = auto-detect (EN/HI/Hinglish)
             beam_size=1,  # greedy: fast on CPU
-            vad_filter=True,  # trim leading/trailing silence
+            vad_filter=False,  # Phase 4 fix — see module docstring
         )
         text = " ".join(seg.text.strip() for seg in segments).strip()
         # diagnostic line: facts only — NEVER the transcript content
         logger.info(
-            "stt: %.1fs audio -> %d chars (lang=%s) in %.1fs",
+            "stt: %.1fs audio -> %d chars (lang=%s, vad=off) in %.1fs",
             len(audio) / 16000, len(text), info.language, time.time() - t0,
         )
         return text

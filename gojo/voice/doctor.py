@@ -6,6 +6,21 @@ the microphone):
     python -m gojo.voice.doctor              # 5 s capture + wake probe
     python -m gojo.voice.doctor --seconds 8  # longer capture
     python -m gojo.voice.doctor --device 15  # override GOJO_MIC_DEVICE
+    python -m gojo.voice.doctor --diagnose   # + Whisper deep-dive (A/B)
+
+The --diagnose deep-dive transcribes the SAME captured sample four ways
+(all local — nothing is sent anywhere) and prints detected language,
+probability, segment count and per-segment text/probability for each:
+
+    app config (auto language, VAD off)   <- what the app now uses
+    old app config (auto language, VAD on)
+    language=hi, VAD off
+    language=en, VAD off
+
+plus, for the best result: per-segment detail (start/end, no-speech
+probability, compression ratio, logprob) and what the WAKE MATCHER
+returns for that actual recognized text (the real test of Hey/Hi/Hello/
+Wake up/Yo Gojo against what Whisper really heard).
 
 It walks the EXACT path the app uses, step by step, and prints a numbered
 report:
@@ -59,11 +74,65 @@ def analyze_capture(raw: np.ndarray, stream_sr: int) -> dict:
     }
 
 
+def whisper_deep_dive(transcribe, buf16: np.ndarray, language_cfg: str,
+                      on_line=print) -> None:
+    """Transcribe one captured sample under 4 STT configs and report
+    language, segments and per-segment detail. `transcribe` is the model's
+    own `transcribe(audio, beam_size=1, **kw) -> (segments, info)` method
+    (or an equivalent in tests). Nothing is sent anywhere."""
+    from .wakeword import match_wake_phrase
+
+    rows = [
+        ("app config", {"language": language_cfg or None, "vad_filter": False,
+                        "condition_on_previous_text": True}),
+        ("old app config (VAD on)", {"language": language_cfg or None,
+                                     "vad_filter": True,
+                                     "condition_on_previous_text": True}),
+        ("language=hi", {"language": "hi", "vad_filter": False,
+                         "condition_on_previous_text": False}),
+        ("language=en", {"language": "en", "vad_filter": False,
+                         "condition_on_previous_text": False}),
+    ]
+    best = None  # (chars, label, segments, info, text)
+    for label, kw in rows:
+        t0 = time.time()
+        segments, info = transcribe(buf16, beam_size=1, **kw)
+        segs = list(segments)
+        text = " ".join(s.text.strip() for s in segs).strip()
+        on_line(
+            f"  [{label}] lang={info.language} p={info.language_probability:.2f} "
+            f"segments={len(segs)} chars={len(text)} ({time.time() - t0:.1f}s)"
+        )
+        on_line(f"      text: {text[:200]!r}" if text else "      text: <empty>")
+        if best is None or len(text) > best[0]:
+            best = (len(text), label, segs, info, text)
+    if best is None:
+        return
+    chars, label, segs, info, text = best
+    if chars == 0:
+        on_line("  no config produced text — the audio is not being decoded "
+                "as speech by any of these settings (see level/resample above).")
+        return
+    on_line(f"  best: [{label}] — segment detail:")
+    for i, s in enumerate(segs):
+        on_line(
+            f"    seg{i}: {s.start:.1f}-{s.end:.1f}s no_speech={s.no_speech_prob:.2f} "
+            f"compression={s.compression_ratio:.2f} logprob={s.avg_logprob:.2f} "
+            f"text={s.text.strip()[:80]!r}"
+        )
+    on_line(f"  wake matcher on full text: {match_wake_phrase(text)!r}")
+    for i, s in enumerate(segs):
+        m = match_wake_phrase(s.text)
+        if m:
+            on_line(f"  wake matcher on seg{i}: {m!r}")
+
+
 def run_doctor(
     seconds: float = 5.0,
     device_spec: str | None = None,
     deps: dict | None = None,
     on_line=print,
+    diagnose: bool = False,
 ) -> int:
     """Run the numbered report. Returns 0 (all OK) or 1 (any failure).
 
@@ -167,11 +236,14 @@ def run_doctor(
     from .stt import SIZES, STTError
 
     model_size = "small"
+    stt_language = ""
     if "stt" not in deps:
         try:
             from ..config import load_settings
 
-            model_size = load_settings().stt_model_size
+            s = load_settings()
+            model_size = s.stt_model_size
+            stt_language = s.stt_language
         except Exception:  # noqa: BLE001
             pass
     stt_size = model_size if model_size in SIZES else "small"
@@ -183,10 +255,12 @@ def run_doctor(
         from .stt import WhisperSTT
 
         t0 = time.time()
-        stt = WhisperSTT(stt_size)
-        stt.ensure_model()
+        stt = WhisperSTT(stt_size, language=stt_language)
+        st["model"] = stt.ensure_model()
         st["stt_fn"] = stt.transcribe
-        return f"whisper '{stt_size}' loaded OK in {time.time() - t0:.1f}s (CPU int8)"
+        lang_note = f", language={'auto' if not stt_language else stt_language}"
+        return (f"whisper '{stt_size}' loaded OK in {time.time() - t0:.1f}s "
+                f"(CPU int8{lang_note}, vad=off)")
 
     step("7", "Whisper model load", load_whisper)
 
@@ -219,6 +293,28 @@ def run_doctor(
     step("9", "brain routing (local check)", brain_routing)
     step("10", "exceptions/timeouts", lambda: "none" if failures == 0
          else f"{failures} step(s) failed (see above)")
+
+    # ------------------------------------------------------------------
+    # deep-dive (A/B STT configs on the SAME sample — all local)
+    # ------------------------------------------------------------------
+    if diagnose:
+        say("")
+        say("--- whisper deep-dive (same sample, nothing is sent anywhere) ---")
+
+        def deep_dive():
+            fn = None
+            if "deep_dive" in deps:
+                fn = deps["deep_dive"]
+            elif "model" in st:
+                fn = st["model"].transcribe
+            else:
+                raise RuntimeError("no real model available in this run")
+            whisper_deep_dive(fn, st["buffer_16k"], stt_language, on_line=say)
+
+        try:
+            deep_dive()
+        except Exception as exc:  # noqa: BLE001 — keep the report going
+            say(f"  deep-dive failed: {type(exc).__name__}: {exc}")
 
     # ------------------------------------------------------------------
     # wake listener probe (separate)
@@ -323,9 +419,12 @@ def main(argv=None) -> int:
                         help="capture + probe duration in seconds (default 5)")
     parser.add_argument("--device", default=None,
                         help="GOJO_MIC_DEVICE override: '' = default, index, or name")
+    parser.add_argument("--diagnose", action="store_true",
+                        help="run the Whisper A/B deep-dive (4 configs, all local)")
     args = parser.parse_args(argv)
     return run_doctor(seconds=args.seconds,
-                      device_spec=args.device if args.device is not None else None)
+                      device_spec=args.device if args.device is not None else None,
+                      diagnose=args.diagnose)
 
 
 if __name__ == "__main__":

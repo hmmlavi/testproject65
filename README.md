@@ -166,7 +166,17 @@ The old terminal chat still works too:  `python -m gojo.cli_chat`
   peak/RMS → resample → Whisper load → transcript → brain routing →
   wake-listener probe — and prints a numbered report (`[1]`…`[10]`,
   `[W1]`…`[W5]`). Send the whole output. Nothing is recorded, stored, or
-  sent anywhere; no keys are read. Also: Settings → Voice → **Test**
+  sent anywhere; no keys are read.
+  If you get audio but an EMPTY transcript, run the deep-dive — it
+  transcribes the same sample 4 ways (app config / old VAD-on /
+  `language=hi` / `language=en`), prints detected language + probability,
+  segment count, per-segment text/probability, and what the wake matcher
+  makes of the actual recognized text:
+  ```bat
+  python -m gojo.voice.doctor --diagnose
+  ```
+  If one explicit language clearly wins, pin it in `.env` with
+  `GOJO_STT_LANGUAGE=hi` (or `en`). Also: Settings → Voice → **Test**
   button now proves the mic is non-silent (shows samples, peak, RMS and
   says `MIC SILENT` if no audio is arriving — e.g. AudioRelay left in
   Playback mode).
